@@ -1,0 +1,12 @@
+{
+  "name": "pi-multi-role-demo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "教程配套示例：用 Pi Agent 扩展搭建一个 PM/Coder/Reviewer 多角色团队",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "name": "pi-single-reviewer-demo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "教程配套示例 Level-1：单角色 Subagent（代码审查员）",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  }
+}

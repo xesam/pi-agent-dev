@@ -1,0 +1,11 @@
+{
+  "name": "pi-safe-coder-demo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "教程配套示例 Level-2：安全编码守卫扩展",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
