@@ -10,6 +10,9 @@ messages = [{ role: "user", content: "…" }]
 
 **Agent 和这一步的差别，只在于多了一个循环。** 你大概也调过 function calling / tool use，但很可能把它当成"让模型吐一段结构化 JSON"用——调一次、拿到参数、完事。Agent 把它当成**循环的驱动器**：模型不再直接回答你，而是先说"我要调用 `read` 工具"，你执行这个工具、把结果作为一条新 message 塞回 `messages`，**再调一次 API**；模型看到工具结果后决定下一步，可能再要一个工具，也可能说"我搞定了，答案是……"，循环才结束。
 
+如果想更容易理解 Agent，可以参考：[《从零理解 AI Agent》](https://github.com/xesam/from-chat-to-agent) 这个更基础的教程。
+
+
 ```
 你给一个任务
    ↓
