@@ -6,14 +6,43 @@
  *
  * 需要：设置 ANTHROPIC_API_KEY 环境变量（或其他已配置的模型）
  *
- * 对应教程章节：第 6d 章 实战 Level-4：用 SDK 嵌入 Pi
+ * 对应教程章节：第 6e 章 实战 Level-4：用 SDK 嵌入 Pi
  */
 
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
+
+// 新版 API：角色提示词的覆盖点从 createAgentSession 移到了 DefaultResourceLoader，
+// 且自带的 loader 要手动 reload()。
+async function reviewerLoader(cwd: string, prompt: string) {
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    systemPromptOverride: () => prompt,   // 替换基础系统提示词为审查员人设
+    appendSystemPromptOverride: () => [], // 不追加默认 prompt
+  });
+  await loader.reload();
+  return loader;
+}
+
+const CI_REVIEWER_PROMPT = [
+  "你是 CI 代码审查员。",
+  "你会收到一个 git diff，需要审查以下方面：",
+  "1. 明显的 Bug 和逻辑错误",
+  "2. 安全漏洞（注入、XSS、敏感信息泄露）",
+  "3. 错误处理是否完整",
+  "4. 是否有遗漏的测试",
+  "",
+  "输出格式：",
+  "- 总体评价（一段话）",
+  "- 问题列表（按严重程度排序，标注文件名和行号）",
+  "- 通过/不通过结论",
+].join("\n");
 
 async function main() {
   // 1. 初始化模型运行时（会自动读取 ~/.pi/agent/ 下的认证和模型配置）
@@ -24,20 +53,7 @@ async function main() {
     sessionManager: SessionManager.inMemory(),  // 不持久化，跑完就扔
     modelRuntime,
     tools: ["read", "grep", "find", "ls"],       // 只读——CI 审查员不能改代码
-    systemPromptOverride: () => [
-      "你是 CI 代码审查员。",
-      "你会收到一个 git diff，需要审查以下方面：",
-      "1. 明显的 Bug 和逻辑错误",
-      "2. 安全漏洞（注入、XSS、敏感信息泄露）",
-      "3. 错误处理是否完整",
-      "4. 是否有遗漏的测试",
-      "",
-      "输出格式：",
-      "- 总体评价（一段话）",
-      "- 问题列表（按严重程度排序，标注文件名和行号）",
-      "- 通过/不通过结论",
-    ].join("\n"),
-    appendSystemPromptOverride: () => [],         // 不追加默认 prompt
+    resourceLoader: await reviewerLoader(process.cwd(), CI_REVIEWER_PROMPT),
   });
 
   // 3. 订阅事件流——收集 Agent 的文字输出

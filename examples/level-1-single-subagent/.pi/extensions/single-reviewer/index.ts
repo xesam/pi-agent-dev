@@ -3,12 +3,14 @@
 // 给 Pi 加一个 delegate_to_reviewer 工具：主 Agent 可以把代码改动
 // 交给一个只读的 Reviewer 子会话审查，Reviewer 返回审查意见。
 //
-// 这是 Ch6c 多角色团队的简化版——只一个角色，不做编排循环，
+// 这是 Ch6d 多角色团队的简化版——只一个角色，不做编排循环，
 // 先把 createAgentSession 的核心 API 跑通。
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -32,6 +34,19 @@ let sharedRuntime: ReturnType<typeof ModelRuntime.create> | undefined;
 function getRuntime() {
   if (!sharedRuntime) sharedRuntime = ModelRuntime.create();
   return sharedRuntime;
+}
+
+// 角色提示词的覆盖点在 ResourceLoader 上（新版 API）。
+// 自带的 loader 不会被 createAgentSession 自动 reload，必须手动调一次。
+async function roleLoader(cwd: string, prompt: string) {
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    systemPromptOverride: () => prompt, // 替换基础系统提示词，只给角色人设
+    appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
+  });
+  await loader.reload();
+  return loader;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -60,17 +75,16 @@ export default function (pi: ExtensionAPI) {
         sessionManager: SessionManager.inMemory(), // 不持久化，用完就扔
         modelRuntime,
         tools: REVIEWER_TOOLS,
-        systemPromptOverride: () => REVIEWER_PROMPT,
-        appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
+        resourceLoader: await roleLoader(ctx.cwd, REVIEWER_PROMPT),
       });
 
       // 把取消信号接到子 session 上：
       // 用户/上层一旦中止，正在跑的 Reviewer 也要立刻停下
       const onAbort = () => void session.abort();
-      if (signal.aborted) {
+      if (signal?.aborted) {
         onAbort();
       } else {
-        signal.addEventListener("abort", onAbort, { once: true });
+        signal?.addEventListener("abort", onAbort, { once: true });
       }
 
       // 收集子 Agent 的文字输出
@@ -88,7 +102,7 @@ export default function (pi: ExtensionAPI) {
         await session.prompt(params.task);
       } finally {
         unsubscribe?.();
-        signal.removeEventListener("abort", onAbort);
+        signal?.removeEventListener("abort", onAbort);
         session.dispose(); // 清理子会话资源
       }
 

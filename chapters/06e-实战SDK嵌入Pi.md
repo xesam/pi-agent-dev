@@ -1,10 +1,10 @@
-## 第 6d 章：实战 Level-4：用 SDK 嵌入 Pi
+## 第 6e 章：实战 Level-4：用 SDK 嵌入 Pi
 
 到目前为止，所有章节都是在 `pi` 的交互式 CLI 里使用 Pi。但 Pi 不只是 CLI——它提供了完整的 SDK，让你在自己的 Node.js 程序里创建 Agent 会话、驱动 Agent Loop、收集结果。
 
 > **代码量**：约 50 行。读完本章你能把 Pi 嵌入 CI 脚本、自动化工具、Web 后端等任何 Node.js 场景。
 
-### 6d.1 SDK 是什么
+### 6e.1 SDK 是什么
 
 Pi 的 npm 包 `@earendil-works/pi-coding-agent` 同时导出了两层东西：
 
@@ -23,9 +23,9 @@ await session.prompt("你的任务");
 session.dispose();
 ```
 
-这跟 Ch6a/Ch6c 里在 Extension 内部用的 `createAgentSession` 是**同一个 API**——多角色扩展里创建子会话用的就是 SDK。区别只是：Extension 里你是被 Pi 调用的，而 SDK 里你是调用方。
+这跟 Ch6a/Ch6d 里在 Extension 内部用的 `createAgentSession` 是**同一个 API**——多角色扩展里创建子会话用的就是 SDK。区别只是：Extension 里你是被 Pi 调用的，而 SDK 里你是调用方。
 
-### 6d.2 场景：CI 代码审查脚本
+### 6e.2 场景：CI 代码审查脚本
 
 你的团队在代码合并前跑 CI。你想加一步：让 Agent 只读地审查 diff，输出一段结构化报告。
 
@@ -35,7 +35,7 @@ session.dispose();
 - SDK 可以拿到完整的消息对象（不只是文字输出），能解析工具调用、token 用量等
 - SDK 可以嵌入现有的 CI 脚本，和测试/构建步骤无缝衔接
 
-### 6d.3 代码
+### 6e.3 代码
 
 创建 `ci-review.ts`：
 
@@ -43,17 +43,48 @@ session.dispose();
 /**
  * CI 代码审查脚本
  *
- * 用法：node ci-review.ts
+ * 用法：node --experimental-strip-types ci-review.ts "$(git diff --cached)"
  * 效果：读取 git diff，让只读 Agent 审查，输出报告到 stdout
  *
  * 需要：设置 ANTHROPIC_API_KEY 环境变量（或其他已配置的模型）
+ *
+ * 对应教程章节：第 6e 章 实战 Level-4：用 SDK 嵌入 Pi
  */
 
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
+
+// 新版 API：角色提示词的覆盖点从 createAgentSession 移到了 DefaultResourceLoader，
+// 且自带的 loader 要手动 reload()。
+async function reviewerLoader(cwd: string, prompt: string) {
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    systemPromptOverride: () => prompt,   // 替换基础系统提示词为审查员人设
+    appendSystemPromptOverride: () => [], // 不追加默认 prompt
+  });
+  await loader.reload();
+  return loader;
+}
+
+const CI_REVIEWER_PROMPT = [
+  "你是 CI 代码审查员。",
+  "你会收到一个 git diff，需要审查以下方面：",
+  "1. 明显的 Bug 和逻辑错误",
+  "2. 安全漏洞（注入、XSS、敏感信息泄露）",
+  "3. 错误处理是否完整",
+  "4. 是否有遗漏的测试",
+  "",
+  "输出格式：",
+  "- 总体评价（一段话）",
+  "- 问题列表（按严重程度排序，标注文件名和行号）",
+  "- 通过/不通过结论",
+].join("\n");
 
 async function main() {
   // 1. 初始化模型运行时（会自动读取 ~/.pi/agent/ 下的认证和模型配置）
@@ -64,20 +95,7 @@ async function main() {
     sessionManager: SessionManager.inMemory(),  // 不持久化，跑完就扔
     modelRuntime,
     tools: ["read", "grep", "find", "ls"],       // 只读——CI 审查员不能改代码
-    systemPromptOverride: () => [
-      "你是 CI 代码审查员。",
-      "你会收到一个 git diff，需要审查以下方面：",
-      "1. 明显的 Bug 和逻辑错误",
-      "2. 安全漏洞（注入、XSS、敏感信息泄露）",
-      "3. 错误处理是否完整",
-      "4. 是否有遗漏的测试",
-      "",
-      "输出格式：",
-      "- 总体评价（一段话）",
-      "- 问题列表（按严重程度排序，标注文件名和行号）",
-      "- 通过/不通过结论",
-    ].join("\n"),
-    appendSystemPromptOverride: () => [],         // 不追加默认 prompt
+    resourceLoader: await reviewerLoader(process.cwd(), CI_REVIEWER_PROMPT),
   });
 
   // 3. 订阅事件流——收集 Agent 的文字输出
@@ -100,7 +118,6 @@ async function main() {
   });
 
   // 4. 获取 git diff 并发送给 Agent
-  // 在真实 CI 里这里用 execSync("git diff origin/main...HEAD") 等
   const diff = process.argv[2] ?? "请先 git add 你的改动，然后运行 git diff --cached";
 
   console.log("=== CI 代码审查开始 ===\n");
@@ -127,7 +144,7 @@ main().catch((err) => {
 });
 ```
 
-### 6d.4 代码逐段解释
+### 6e.4 代码逐段解释
 
 **① `ModelRuntime.create()`**
 
@@ -140,12 +157,20 @@ const modelRuntime = await ModelRuntime.create();
 **② `createAgentSession` 的关键选项**
 
 ```typescript
+// 新版 API：角色提示词的覆盖点在 ResourceLoader 上，不在 createAgentSession 选项里
+const loader = new DefaultResourceLoader({
+  cwd,                                   // 工作目录
+  agentDir: getAgentDir(),               // 全局配置目录
+  systemPromptOverride: () => "...",      // 自定义系统提示词
+  appendSystemPromptOverride: () => [],  // 不追加默认内容
+});
+await loader.reload();                   // 自带 loader 要手动 reload
+
 const { session } = await createAgentSession({
   sessionManager: SessionManager.inMemory(),  // 内存会话，不写文件
   modelRuntime,
   tools: ["read", "grep", "find", "ls"],       // 只读工具集
-  systemPromptOverride: () => "...",            // 自定义系统提示词
-  appendSystemPromptOverride: () => [],         // 不追加默认内容
+  resourceLoader: loader,                     // 角色提示词从这里注入
 });
 ```
 
@@ -180,7 +205,7 @@ session.dispose();
 
 跟 Ch6a 一样，用完必须清理。
 
-### 6d.5 运行
+### 6e.5 运行
 
 ```bash
 # 前提：已经在 pi CLI 里 /login 过，或设置了 API Key 环境变量
@@ -195,7 +220,7 @@ node --experimental-strip-types ci-review.ts "$(git diff --cached)"
 
 > **注意**：上面的 `--experimental-strip-types` 是 Node.js 22+ 直接运行 TypeScript 的方式。如果你的 Node 版本较低，可以用 `tsx ci-review.ts` 或先 `tsc` 编译。
 
-### 6d.6 SDK vs CLI：什么时候用哪个
+### 6e.6 SDK vs CLI：什么时候用哪个
 
 | 维度 | CLI（`pi` 命令） | SDK（`createAgentSession`） |
 |------|------------------|---------------------------|
@@ -208,7 +233,7 @@ node --experimental-strip-types ci-review.ts "$(git diff --cached)"
 
 **简单原则**：需要人机交互 → CLI；需要嵌入程序 → SDK。
 
-### 6d.7 进阶：加载扩展和 Skill
+### 6e.7 进阶：加载扩展和 Skill
 
 SDK 不只是"裸" Agent——你也可以加载项目里的扩展和 Skill：
 
@@ -228,17 +253,18 @@ const { session } = await createAgentSession({
 
 这样你在 SDK 里也能用项目里定义的扩展工具和 Skill——跟在 CLI 里完全一样。
 
-### 6d.8 从这里到下一步
+### 6e.8 从这里到下一步
 
 ```
 Ch6a（Extension 内用 SDK）   → 被 Pi 调用
 Ch6b（安全守卫）             → 纯 Extension，不涉及 SDK
-Ch6c（多角色团队）           → Extension 内用 SDK 创建多个子会话
-Ch6d（SDK 嵌入）             → 你自己调用 SDK          ← 本章
+Ch6c（数据收集与表格）       → 两 Agent 交接结构化产物，仍然不涉及 SDK
+Ch6d（多角色团队）           → Extension 内用 SDK 创建多个子会话
+Ch6e（SDK 嵌入）             → 你自己调用 SDK          ← 本章
 ```
 
-Ch6c 和 Ch6d 是同一套 API 的两种用法：在 Extension 里用（Ch6c），和在自己程序里用（Ch6d）。理解了这一层，你就完全掌握了 Pi 的扩展生态。
+Ch6d 和 Ch6e 是同一套 API 的两种用法：在 Extension 里用（Ch6d），和在自己程序里用（Ch6e）。理解了这一层，你就完全掌握了 Pi 的扩展生态。
 
 ---
 
-← [上一章：第 6c 章 实战 Level-3：多角色 Agent 团队](06c-实战多角色Agent团队.md) ｜ [下一章：第 6e 章 调试与观测](06e-调试与观测.md) →
+← [上一章：第 6d 章 实战 Level-3：多角色 Agent 团队](06d-实战多角色Agent团队.md) ｜ [下一章：第 6f 章 调试与观测](06f-调试与观测.md) →

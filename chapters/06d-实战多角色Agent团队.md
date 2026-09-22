@@ -1,8 +1,8 @@
-## 第 6c 章：实战 Level-3：多角色 Agent 团队
+## 第 6d 章：实战 Level-3：多角色 Agent 团队
 
 理论讲完了，现在动手做一个真正"多角色协作"的 Agent 产品。
 
-> **前置阅读**：本章假设你已经读了 [第 6a 章（单角色 Subagent）](06a-实战单角色Subagent.md)和[第 6b 章（安全编码守卫）](06b-实战安全编码守卫.md)，理解了 `createAgentSession`、工具白名单、事件拦截和状态持久化。本章把这三者组合成完整的多角色系统。
+> **前置阅读**：本章假设你已经读了 [第 6a 章（单角色 Subagent）](06a-实战单角色Subagent.md)和[第 6b 章（安全编码守卫）](06b-实战安全编码守卫.md)，理解了 `createAgentSession`、工具白名单、事件拦截和状态持久化；建议再过一遍[第 6c 章（数据分析与报表生成）](06c-实战数据分析与报表.md)，那里你已经第一次体验了“两个 Agent 交接结构化产物”——本章把角色从两个扩到三个、把固定流程扩成模型自编排。
 
 ### 6.1 需求与设计
 
@@ -29,7 +29,7 @@
 2. **独立的工具集**——PM 和 Reviewer 不能改代码，Coder 才能写文件、跑命令。
 3. **独立的对话**——Coder 在干活时它自己跟模型的来回，不应该污染 Leader 的对话历史。
 
-而第 1 章讲的 Agent Loop，本质就是"一段对话 + 一组工具 + 一个系统提示词"在循环。Pi 的 SDK 提供的 `createAgentSession()` 恰好能一次给齐这三样：它的 `systemPromptOverride` 给独立人设，`tools` 给独立工具白名单，每次调用都是一个全新的 in-memory 会话、独立的对话历史。三样对三样，拼上就是——
+而第 1 章讲的 Agent Loop，本质就是"一段对话 + 一组工具 + 一个系统提示词"在循环。Pi 的 SDK 提供的 `createAgentSession()` 恰好能一次给齐这三样：它的 `resourceLoader` + `systemPromptOverride` 给独立人设，`tools` 给独立工具白名单，每次调用都是一个全新的 in-memory 会话、独立的对话历史。三样对三样，拼上就是——
 
 > **一个"角色" = 一个用特定 system prompt + 特定工具集创建出来的独立 AgentSession。**
 
@@ -97,9 +97,11 @@ my-team-project/
 //   3. 子 Agent 现在会监听工具调用的 abort signal，一旦上层调用被取消，
 //      立刻调用子 session.abort()，避免用户取消后 Coder 仍在后台继续跑。
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -156,6 +158,20 @@ function getSharedModelRuntime() {
     sharedModelRuntimePromise = ModelRuntime.create();
   }
   return sharedModelRuntimePromise;
+}
+
+// 角色提示词的覆盖点在 ResourceLoader 上（新版 API：
+// systemPromptOverride 从 createAgentSession 移到了 DefaultResourceLoader）。
+// 注意：自带的 loader 不会被 createAgentSession 自动 reload，必须手动调一次。
+async function roleLoader(cwd: string, prompt: string) {
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    systemPromptOverride: () => prompt,
+    appendSystemPromptOverride: () => [],
+  });
+  await loader.reload();
+  return loader;
 }
 
 // ---------------------------------------------------------------------------
@@ -222,14 +238,14 @@ export default function (pi: ExtensionAPI) {
       }
 
       const roleConfig = ROLES[role];
-      onUpdate?.({ content: [{ type: "text", text: `[${role}] 开始处理...` }] });
+      onUpdate?.({ content: [{ type: "text", text: `[${role}] 开始处理...` }], details: {} });
 
       const modelRuntime = await getSharedModelRuntime();
 
       // reviewer 专属：submit_review 结构化交付工具。
       // 用闭包变量捕获这次调用里 reviewer 提交的结论，而不是去解析自由文本。
       let capturedVerdict: { verdict: "approved" | "rejected"; comments: string } | null = null;
-      const customTools =
+      const customTools: ToolDefinition[] =
         role === "reviewer"
           ? [
               {
@@ -259,8 +275,7 @@ export default function (pi: ExtensionAPI) {
         modelRuntime,
         tools: roleConfig.tools,
         customTools,
-        systemPromptOverride: () => roleConfig.prompt,
-        appendSystemPromptOverride: () => [],
+        resourceLoader: await roleLoader(ctx.cwd, roleConfig.prompt),
       });
 
       // 把上层工具调用的取消信号接到子 session 上：
@@ -268,10 +283,10 @@ export default function (pi: ExtensionAPI) {
       const onAbort = () => {
         void session.abort();
       };
-      if (signal.aborted) {
+      if (signal?.aborted) {
         onAbort();
       } else {
-        signal.addEventListener("abort", onAbort, { once: true });
+        signal?.addEventListener("abort", onAbort, { once: true });
       }
 
       let output = "";
@@ -288,7 +303,7 @@ export default function (pi: ExtensionAPI) {
         await session.prompt(params.task);
       } finally {
         unsubscribe?.();
-        signal.removeEventListener("abort", onAbort);
+        signal?.removeEventListener("abort", onAbort);
         session.dispose();
       }
 
@@ -366,7 +381,7 @@ export default function (pi: ExtensionAPI) {
 
 1. **每个角色的"人设"就是一段 system prompt** —— 跟你在跟同事交代任务时说的话没有本质区别，只是写成了代码常量。这就是"Prompt Engineering"在 Agent 系统里的真实样子。
 2. **`tools: roleConfig.tools` 是安全边界** —— PM 和 Reviewer 被限制成只读工具，物理上就不可能手滑改代码，不需要靠"提示词说别改代码"这种软约束。这是本教程反复强调的一个原则：**能用工具白名单做的约束，就不要只靠 prompt 去"求"模型遵守**。
-3. **`appendSystemPromptOverride: () => []`** 是一个容易踩的坑——如果不设置，Pi 会自动把 `APPEND_SYSTEM.md` 追加到你精心定制的角色 prompt 后面，导致角色人设被"污染"。
+3. **`appendSystemPromptOverride: () => []`** 是一个容易踩的坑——如果不设置，Pi 会自动把 `APPEND_SYSTEM.md` 追加到你精心定制的角色 prompt 后面，导致角色人设被"污染"。同理，注意这个 override 现在配在 `DefaultResourceLoader` 上而不是 `createAgentSession` 的选项里，而且自带的 loader 要手动 `await loader.reload()`——`createAgentSession` 只 reload 它自己创建的默认 loader。
 4. **子 Agent 通过 `subscribe` 收集 `text_delta` 拼出完整回复**，再作为 `delegate` 工具的返回值交回给 Leader（主 Agent）。对 Leader 来说，`delegate` 跟调用 `read`、`bash` 没有任何区别——都是"调用一个工具，拿到一段文字结果"，这正是这套设计的优雅之处：**多 Agent 协作，对外表现就是"一个普通工具调用"**。
 5. **Reviewer 的结论用 `submit_review` 这个专属工具结构化提交，而不是解析文字前缀**——`delegate` 工具给 `role === "reviewer"` 的子 session 额外注入了一个只有它能用的 `customTools`，模型必须调用 `submit_review({ verdict, comments })` 才能把结论带出来。工具参数是 JSON Schema 校验过的硬数据，比"要求模型的回复必须以 APPROVED 开头"这种字符串前缀可靠得多——万一模型说"基本没问题，APPROVED"，字符串前缀匹配就会失败，但结构化参数不会。如果模型没调用 `submit_review` 就结束了（极端情况），代码会诚实地把这种"结论缺失"标记出来（`REVIEWER_DID_NOT_SUBMIT`），而不是假装解析出了一个结果。
 6. **`MAX_CODER_DELEGATIONS` 是代码层的重试熔断**——只在 prompt 里写"最多重试 3 次"是软约束，模型可能不遵守（比如陷入"再试一次"的执念）。这里用一个模块级计数器 `coderDelegationCount`，每次 `delegate` 到 `coder` 就自增，超过上限后 `delegate` 直接返回 `CIRCUIT_BREAKER` 标记而不再创建子 Agent，逼 Leader 停止循环、如实汇报。`/team` 命令在每次启动新一轮协作时会重置这个计数器。
@@ -454,4 +469,4 @@ Leader:  → 向用户总结全过程
 
 ---
 
-← [上一章：第 6b 章 实战 Level-2：安全编码守卫扩展](06b-实战安全编码守卫.md) ｜ [下一章：第 6d 章 实战 Level-4：用 SDK 嵌入 Pi](06d-实战SDK嵌入Pi.md) →
+← [上一章：第 6c 章 实战 Level-2.5：数据分析与报表生成](06c-实战数据分析与报表.md) ｜ [下一章：第 6e 章 实战 Level-4：用 SDK 嵌入 Pi](06e-实战SDK嵌入Pi.md) →

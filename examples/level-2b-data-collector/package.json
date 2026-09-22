@@ -1,0 +1,12 @@
+{
+  "name": "pi-data-collector-demo",
+  "private": true,
+  "version": "0.1.0",
+  "description": "教程配套示例 Level-2.5：数据分析与报表生成（读 CSV，筛选→计算→洞察→渲染，两 Agent 两次交接结构化数据）",
+  "keywords": ["pi-package"],
+  "peerDependencies": {
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
+  }
+}

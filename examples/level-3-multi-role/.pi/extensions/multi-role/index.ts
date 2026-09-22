@@ -17,9 +17,11 @@
 //   3. 子 Agent 现在会监听工具调用的 abort signal，一旦上层调用被取消，
 //      立刻调用子 session.abort()，避免用户取消后 Coder 仍在后台继续跑。
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { ExtensionAPI, ToolDefinition } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -76,6 +78,20 @@ function getSharedModelRuntime() {
     sharedModelRuntimePromise = ModelRuntime.create();
   }
   return sharedModelRuntimePromise;
+}
+
+// 角色提示词的覆盖点在 ResourceLoader 上（新版 API：
+// systemPromptOverride 从 createAgentSession 移到了 DefaultResourceLoader）。
+// 注意：自带的 loader 不会被 createAgentSession 自动 reload，必须手动调一次。
+async function roleLoader(cwd: string, prompt: string) {
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    systemPromptOverride: () => prompt,
+    appendSystemPromptOverride: () => [],
+  });
+  await loader.reload();
+  return loader;
 }
 
 // ---------------------------------------------------------------------------
@@ -142,14 +158,14 @@ export default function (pi: ExtensionAPI) {
       }
 
       const roleConfig = ROLES[role];
-      onUpdate?.({ content: [{ type: "text", text: `[${role}] 开始处理...` }] });
+      onUpdate?.({ content: [{ type: "text", text: `[${role}] 开始处理...` }], details: {} });
 
       const modelRuntime = await getSharedModelRuntime();
 
       // reviewer 专属：submit_review 结构化交付工具。
       // 用闭包变量捕获这次调用里 reviewer 提交的结论，而不是去解析自由文本。
       let capturedVerdict: { verdict: "approved" | "rejected"; comments: string } | null = null;
-      const customTools =
+      const customTools: ToolDefinition[] =
         role === "reviewer"
           ? [
               {
@@ -179,8 +195,7 @@ export default function (pi: ExtensionAPI) {
         modelRuntime,
         tools: roleConfig.tools,
         customTools,
-        systemPromptOverride: () => roleConfig.prompt,
-        appendSystemPromptOverride: () => [],
+        resourceLoader: await roleLoader(ctx.cwd, roleConfig.prompt),
       });
 
       // 把上层工具调用的取消信号接到子 session 上：
@@ -188,10 +203,10 @@ export default function (pi: ExtensionAPI) {
       const onAbort = () => {
         void session.abort();
       };
-      if (signal.aborted) {
+      if (signal?.aborted) {
         onAbort();
       } else {
-        signal.addEventListener("abort", onAbort, { once: true });
+        signal?.addEventListener("abort", onAbort, { once: true });
       }
 
       let output = "";
@@ -208,7 +223,7 @@ export default function (pi: ExtensionAPI) {
         await session.prompt(params.task);
       } finally {
         unsubscribe?.();
-        signal.removeEventListener("abort", onAbort);
+        signal?.removeEventListener("abort", onAbort);
         session.dispose();
       }
 

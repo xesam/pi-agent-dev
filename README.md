@@ -9,6 +9,8 @@
 
 参考资料：[Pi 官方仓库](https://github.com/earendil-works/pi) · [Pi 官方文档](https://pi.dev/docs/latest)
 
+> **⚠️ 关于版本**：Pi 尚未发布稳定版（1.0 之前），**API 会变**。本教程的代码基于教程写作/维护时验证过的版本（迁移到 0.87 系的 `DefaultResourceLoader` 角色提示词模式）；你手上的版本可能更新。如果照着教程写代码时遇到"选项不存在"、"类型不匹配"这类报错，**以你本地安装包的类型定义为准**（不是教程、也不是网上任何文章），处理方法见[第 5 章开头](chapters/05-扩展Pi的三种方式.md)的"API 不稳定怎么办"。
+
 ---
 
 ## 章节目录
@@ -37,9 +39,10 @@
 |---|---|---|---|---|
 | 第 6a 章 | 实战 Level-1：单角色 Subagent | [`chapters/06a-实战单角色Subagent.md`](chapters/06a-实战单角色Subagent.md) | 用 `createAgentSession` 创建只读审查员 | ~60 行 |
 | 第 6b 章 | 实战 Level-2：安全编码守卫 | [`chapters/06b-实战安全编码守卫.md`](chapters/06b-实战安全编码守卫.md) | 路径保护 + 命令拦截 + 状态持久化 | ~80 行 |
-| 第 6c 章 | 实战 Level-3：多角色 Agent 团队 | [`chapters/06c-实战多角色Agent团队.md`](chapters/06c-实战多角色Agent团队.md) | PM → Coder → Reviewer 三角色协作 | ~230 行 |
-| 第 6d 章 | 实战 Level-4：用 SDK 嵌入 Pi | [`chapters/06d-实战SDK嵌入Pi.md`](chapters/06d-实战SDK嵌入Pi.md) | 把 Pi 嵌入 CI 代码审查脚本 | ~50 行 |
-| 第 6e 章 | 调试与观测 | [`chapters/06e-调试与观测.md`](chapters/06e-调试与观测.md) | 观测 Leader/子 Agent 行为，隔离角色测试，排错路径 | — |
+| 第 6c 章 | 实战 Level-2.5：数据分析与报表生成 | [`chapters/06c-实战数据分析与报表.md`](chapters/06c-实战数据分析与报表.md) | 两 Agent 两次交接结构化产物；代码算数 + 模型判断 | ~300 行 |
+| 第 6d 章 | 实战 Level-3：多角色 Agent 团队 | [`chapters/06d-实战多角色Agent团队.md`](chapters/06d-实战多角色Agent团队.md) | PM → Coder → Reviewer 三角色协作 | ~230 行 |
+| 第 6e 章 | 实战 Level-4：用 SDK 嵌入 Pi | [`chapters/06e-实战SDK嵌入Pi.md`](chapters/06e-实战SDK嵌入Pi.md) | 把 Pi 嵌入 CI 代码审查脚本 | ~50 行 |
+| 第 6f 章 | 调试与观测 | [`chapters/06f-调试与观测.md`](chapters/06f-调试与观测.md) | 观测 Leader/子 Agent 行为，隔离角色测试，排错路径 | — |
 
 ### 第四部分：进阶与参考
 
@@ -53,8 +56,8 @@
 
 ```
 零基础读者：     Ch1 → Ch2 → Ch3 → Ch4 → Ch5b → Ch5c → Ch5d → Ch6a → (Ch6c)
-有 Agent 经验：  Ch2 → Ch5 → Ch5d → Ch6a → Ch6c
-想嵌入 Pi 到程序：Ch5 → Ch6d
+有 Agent 经验：  Ch2 → Ch5 → Ch5d → Ch6a → Ch6c → Ch6d
+想嵌入 Pi 到程序：Ch5 → Ch6e
 想写安全扩展：   Ch5d → Ch6b → Ch7b
 快速查阅：       直接看 附录（概念速查 + FAQ + 设计模式速查）
 ```
@@ -69,8 +72,9 @@
 | `examples/level-0-skill/` | 第 5c 章 | Skill 示例 | `cd` 进去 → `pi` → `/trust` → `/reload` |
 | `examples/level-1-single-subagent/` | 第 6a 章 | 单角色 Subagent | `cd` 进去 → `pi` → `/trust` → `/reload` |
 | `examples/level-2-safe-coder/` | 第 6b 章 | 安全编码守卫 | `cd` 进去 → `pi` → `/trust` → `/reload` |
-| `examples/level-3-multi-role/` | 第 6c 章 | 多角色团队 | `cd` 进去 → `pi` → `/trust` → `/team <需求>` |
-| `examples/level-4-sdk-ci-reviewer/` | 第 6d 章 | SDK CI 审查脚本 | `npm install` → `node --experimental-strip-types ci-review.ts "<diff>"` |
+| `examples/level-2b-data-collector/` | 第 6c 章 | 数据分析与报表生成 | `cd` 进去 → `pi` → `/trust` → 对话描述分析要求 |
+| `examples/level-3-multi-role/` | 第 6d 章 | 多角色团队 | `cd` 进去 → `pi` → `/trust` → `/team <需求>` |
+| `examples/level-4-sdk-ci-reviewer/` | 第 6e 章 | SDK CI 审查脚本 | `npm install` → `node --experimental-strip-types ci-review.ts "<diff>"` |
 
 ---
 
@@ -81,6 +85,7 @@ Level 0:  0 行代码   → 只写 .md 文件（模板/Skill）         → "扩
 Level 1: ~10 行     → 单个工具 or 单个拦截（Ch5d）         → "Extension 就这么简单"
 Level 2: ~60 行     → 单角色 Subagent（Ch6a）              → "子 Agent = 独立会话"
 Level 3: ~80 行     → 安全编码守卫（Ch6b）                  → "工具白名单 + 事件拦截 = 安全边界"
-Level 4: ~230 行    → 多角色团队（Ch6c）                    → "多角色协作 = Leader 调工具"
-Level 5: ~50 行     → SDK 嵌入（Ch6d）                      → "Pi 不只是 CLI"
+Level 3.5: ~300 行  → 数据分析与报表生成（Ch6c）            → "代码算数 + 模型判断"
+Level 4: ~230 行    → 多角色团队（Ch6d）                    → "多角色协作 = Leader 调工具"
+Level 5: ~50 行     → SDK 嵌入（Ch6e）                      → "Pi 不只是 CLI"
 ```

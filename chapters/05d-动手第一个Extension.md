@@ -154,7 +154,7 @@ Mini-lab B (pi.on tool_call)  →  模型已有的"动作"被加了一道检查
   下一章 Ch6a 就会看到这种组合。
 ```
 
-这正是第 6 章多角色扩展的基础——`delegate` 工具就是用 `registerTool` 注册的，而安全相关的检查（如熔断）就是用代码逻辑在 `execute` 里拦截的。Ch6a 会带你从单角色开始，Ch6c 则把三个角色组合在一起。
+这正是第 6 章多角色扩展的基础——`delegate` 工具就是用 `registerTool` 注册的，而安全相关的检查（如熔断）就是用代码逻辑在 `execute` 里拦截的。Ch6a 会带你从单角色开始，Ch6d 则把三个角色组合在一起。
 
 ### 5d.5 Extension 存放位置
 

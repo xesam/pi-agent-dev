@@ -2,7 +2,7 @@
 
 你已经会写简单的 Extension 了（上一章的两个 mini-lab）。现在更进一步——用 `createAgentSession` 创建一个**独立的子 Agent 会话**，让它扮演"代码审查员"的角色。
 
-这是 Ch6c 多角色团队的基础。但在这一章里，我们只做**一个角色**，不做编排循环，不做熔断——先把"子 Agent = 独立会话"这个核心概念消化掉。
+这是 Ch6d 多角色团队的基础。但在这一章里，我们只做**一个角色**，不做编排循环，不做熔断——先把"子 Agent = 独立会话"这个核心概念消化掉。
 
 > **代码量**：约 60 行。读完本章你能在 30 分钟内亲手跑通一个"写完代码 → 自动叫审查员检查 → 汇报"的流程。
 
@@ -20,9 +20,9 @@ Pi 调用 delegate_to_reviewer 工具
 Pi 根据审查意见决定是否需要修改
 ```
 
-跟 Ch6c 多角色团队的区别：
+跟 Ch6d 多角色团队的区别：
 
-| 维度 | 本章（Level 1） | Ch6c（Level 3） |
+| 维度 | 本章（Level 1） | Ch6d（Level 3） |
 |------|----------------|-----------------|
 | 角色数 | 1（reviewer） | 3（pm + coder + reviewer） |
 | 编排方式 | Leader 直接调，简单 | Leader 按 prompt 自主编排循环 |
@@ -56,12 +56,14 @@ Pi 的 SDK 提供 `createAgentSession()`，可以在 Extension 内部**创建另
 // 给 Pi 加一个 delegate_to_reviewer 工具：主 Agent 可以把代码改动
 // 交给一个只读的 Reviewer 子会话审查，Reviewer 返回审查意见。
 //
-// 这是 Ch6c 多角色团队的简化版——只一个角色，不做编排循环，
+// 这是 Ch6d 多角色团队的简化版——只一个角色，不做编排循环，
 // 先把 createAgentSession 的核心 API 跑通。
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import {
   createAgentSession,
+  DefaultResourceLoader,
+  getAgentDir,
   ModelRuntime,
   SessionManager,
 } from "@earendil-works/pi-coding-agent";
@@ -85,6 +87,19 @@ let sharedRuntime: ReturnType<typeof ModelRuntime.create> | undefined;
 function getRuntime() {
   if (!sharedRuntime) sharedRuntime = ModelRuntime.create();
   return sharedRuntime;
+}
+
+// 角色提示词的覆盖点在 ResourceLoader 上（新版 API）。
+// 自带的 loader 不会被 createAgentSession 自动 reload，必须手动调一次。
+async function roleLoader(cwd: string, prompt: string) {
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    systemPromptOverride: () => prompt, // 替换基础系统提示词，只给角色人设
+    appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
+  });
+  await loader.reload();
+  return loader;
 }
 
 export default function (pi: ExtensionAPI) {
@@ -113,17 +128,16 @@ export default function (pi: ExtensionAPI) {
         sessionManager: SessionManager.inMemory(), // 不持久化，用完就扔
         modelRuntime,
         tools: REVIEWER_TOOLS,
-        systemPromptOverride: () => REVIEWER_PROMPT,
-        appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
+        resourceLoader: await roleLoader(ctx.cwd, REVIEWER_PROMPT),
       });
 
       // 把取消信号接到子 session 上：
       // 用户/上层一旦中止，正在跑的 Reviewer 也要立刻停下
       const onAbort = () => void session.abort();
-      if (signal.aborted) {
+      if (signal?.aborted) {
         onAbort();
       } else {
-        signal.addEventListener("abort", onAbort, { once: true });
+        signal?.addEventListener("abort", onAbort, { once: true });
       }
 
       // 收集子 Agent 的文字输出
@@ -141,7 +155,7 @@ export default function (pi: ExtensionAPI) {
         await session.prompt(params.task);
       } finally {
         unsubscribe?.();
-        signal.removeEventListener("abort", onAbort);
+        signal?.removeEventListener("abort", onAbort);
         session.dispose(); // 清理子会话资源
       }
 
@@ -184,21 +198,36 @@ const REVIEWER_TOOLS = ["read", "grep", "find", "ls"];
 
 **③ 创建子会话**
 
+角色人设的注入点值得多说一句：它不在 `createAgentSession` 的选项里，而在 **ResourceLoader** 上——
+
 ```typescript
+// 新版 API：systemPromptOverride 移到了 DefaultResourceLoader。
+// 自带的 loader 不会被 createAgentSession 自动 reload，必须手动调一次。
+async function roleLoader(cwd: string, prompt: string) {
+  const loader = new DefaultResourceLoader({
+    cwd,
+    agentDir: getAgentDir(),
+    systemPromptOverride: () => prompt,    // 替换基础系统提示词，只给角色人设
+    appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
+  });
+  await loader.reload();
+  return loader;
+}
+
 const { session } = await createAgentSession({
   cwd: ctx.cwd,                    // 共享工作目录
   sessionManager: SessionManager.inMemory(),  // 不持久化
   modelRuntime,                    // 共享模型配置
   tools: REVIEWER_TOOLS,           // 只读工具
-  systemPromptOverride: () => REVIEWER_PROMPT,
-  appendSystemPromptOverride: () => [],       // 防污染
+  resourceLoader: await roleLoader(ctx.cwd, REVIEWER_PROMPT), // 角色人设
 });
 ```
 
 每一个选项都值得记住：
 - `SessionManager.inMemory()` — 子会话用完即弃，不写文件
-- `systemPromptOverride` — 替换默认系统提示词，只给 Reviewer 的人设
+- `resourceLoader` + `systemPromptOverride` — 替换基础系统提示词，只给 Reviewer 的人设（早期版本里这个选项直接在 `createAgentSession` 上，后来移到了 ResourceLoader——角色人设本质上是"会话加载哪些资源"的一部分，所以被归进了 loader）
 - `appendSystemPromptOverride: () => []` — 不让 `APPEND_SYSTEM.md` 的内容追加到 Reviewer 的提示词后面（否则角色人设会被"污染"）
+- 手动 `await loader.reload()` — `createAgentSession` 只会 reload 它自己创建的默认 loader，你传入的自定义 loader 要自己加载一次
 
 **④ 收集输出**
 
@@ -222,14 +251,14 @@ await session.prompt(params.task);
 
 ```typescript
 const onAbort = () => void session.abort();
-if (signal.aborted) {
+if (signal?.aborted) {
   onAbort();
 } else {
-  signal.addEventListener("abort", onAbort, { once: true });
+  signal?.addEventListener("abort", onAbort, { once: true });
 }
 ```
 
-这里的 **`signal`** 是 `execute` 参数里的第三个参数（第 5 章讲 `execute` 五参数时提过它）——一个 `AbortSignal`，代表"这次工具调用被取消了吗"。一旦上层（用户按了停止、或 Leader 被中止）触发取消，`signal` 就会 abort。这几行做的是：监听 `signal`，一旦它 abort 就立刻调 `session.abort()` 把子会话也打断——否则用户取消了 Leader，Reviewer 还在后台傻跑。第 6c 章会更详细地讲这个模式。
+这里的 **`signal`** 是 `execute` 参数里的第三个参数（第 5 章讲 `execute` 五参数时提过它）——一个 `AbortSignal`，代表"这次工具调用被取消了吗"。一旦上层（用户按了停止、或 Leader 被中止）触发取消，`signal` 就会 abort。这几行做的是：监听 `signal`，一旦它 abort 就立刻调 `session.abort()` 把子会话也打断——否则用户取消了 Leader，Reviewer 还在后台傻跑。第 6d 章会更详细地讲这个模式。
 
 **⑤ 清理**
 
@@ -269,15 +298,15 @@ Pi 写完后，再让它审查：
 - **Reviewer 修改了文件**：不可能——`REVIEWER_TOOLS` 里没有 `write`/`edit`。如果发生了说明你的工具白名单没生效，检查 `tools` 选项是否传对了
 - **子会话很慢**：`getRuntime()` 做了缓存，第一次调用初始化模型配置会慢，后续会快
 
-### 6a.7 从这里到 Ch6c
+### 6a.7 从这里到 Ch6d
 
-这 60 行代码已经包含了 Ch6c 多角色团队的 **80% 核心 API**：
+这 60 行代码已经包含了 Ch6d 多角色团队的 **80% 核心 API**：
 
-| 本章已覆盖 | Ch6c 在此基础上加什么 |
+| 本章已覆盖 | Ch6d 在此基础上加什么 |
 |-----------|---------------------|
 | `createAgentSession` 创建子会话 | 创建 3 个不同角色的子会话 |
 | `tools` 工具白名单 | 每个角色不同的白名单 |
-| `systemPromptOverride` 角色人设 | 3 套不同的 system prompt |
+| `resourceLoader` + `systemPromptOverride` 角色人设 | 3 套不同的角色提示词 |
 | `subscribe` + `prompt` 收集输出 | 同 |
 | `signal` + `abort` 取消传播 | 同 |
 | `dispose` 清理 | 同 |
@@ -285,7 +314,7 @@ Pi 写完后，再让它审查：
 | — | `MAX_CODER_DELEGATIONS` 熔断 |
 | — | `/team` 命令和 Leader 编排 prompt |
 
-如果你读懂了这 60 行，Ch6c 的 230 行只是在"更多角色"和"更安全"两个方向上展开——没有新的核心 API。
+如果你读懂了这 60 行，Ch6d 的 230 行只是在"更多角色"和"更安全"两个方向上展开——没有新的核心 API。
 
 ---
 
