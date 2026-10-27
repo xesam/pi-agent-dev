@@ -12,18 +12,22 @@
    ```typescript
    // /team 的 handler 里，不再发“说明书”给 Leader，而是自己按顺序调 delegate
    const pm = await delegateToRole("pm", requirement);            // 拆任务
+   let feedback = "";
+   let approved = false;
    for (let i = 0; i < MAX; i++) {
-     const coder = await delegateToRole("coder", pm.tasks + (i ? review.comments : ""));
-     const review = await delegateToRole("reviewer", pm.criteria + coder.summary);
-     if (review.verdict === "approved") break;                   // 通过就停
+     const coder = await delegateToRole("coder", pm.tasks + "\n" + feedback);
+     const review = await delegateToRole("reviewer", pm.criteria + "\n" + coder.summary);
+     if (review.verdict === "approved") { approved = true; break; }
+     feedback = review.comments;
    }
+   if (!approved) throw new Error("已达调用上限，仍未通过审查");
    ```
 
-   注意这里的 `delegateToRole` 是你自己包的一层（直接调 `createAgentSession`），不再经过 Leader 的 Agent Loop——步骤顺序变成了硬邦邦的 `for` 循环，但“每一步具体怎么做”仍然留给对应角色的模型。
+   注意这里的 `delegateToRole` 是你自己包的一层（直接调 `createAgentSession`，并把 PM/Coder 的文本结果解析为 `tasks` / `criteria` / `summary`，Reviewer 返回结构化结论），不再经过 Leader 的 Agent Loop——步骤顺序变成了硬邦邦的 `for` 循环，但“每一步具体怎么做”仍然留给对应角色的模型。
 
 3. **可视化协作过程**:用 `registerEntryRenderer` + `pi.appendEntry` 把每次 delegate 的角色、任务、结果渲染成一张"任务卡片",而不是纯文字滚动,这样在 TUI 里看多角色协作会清晰很多(参考第 5.3 节 Custom UI 部分文档)。
 4. **审计与拦截**：用 `tool_call` 事件拦截 `delegate`，记录每一次角色调用的完整日志到文件，方便复盘"AI 团队"到底做了什么决策——这对于生产环境的可追溯性很重要。
-5. **人工介入点**：在 Coder 角色的 `execute` 里，涉及到 `bash` 危险命令时用 `ctx.ui.confirm` 弹出确认（就是第 5.3 节那个 `rm -rf` 拦截的例子），把"全自动"和"人工审批"结合起来。
+5. **人工介入点**：给 Coder 子会话的 `bash` 注入带策略检查的自定义工具包装，在实际执行命令前通过主会话的 `ctx.ui.confirm` 弹出确认；没有 UI 时直接拒绝需要确认的操作（就是第 5.3 节那个 `rm -rf` 拦截的例子），把"全自动"和"人工审批"结合起来。
 6. **把角色做成独立 Skill**:如果某个角色需要一套复杂的操作手册(比如 Reviewer 需要遵循公司的编码规范文档),把这部分内容做成一个 Skill 放在 `.pi/skills/`,在角色的 system prompt 里提一句"请先阅读 code-review-standards 这个 Skill",让 Coder/Reviewer 子会话按需去读,而不是把规范全文本硬编码进 system prompt 里撑爆上下文。
 
    伪代码示意：
@@ -37,4 +41,4 @@
 
 ---
 
-← [上一章：第 6e 章 实战 Level-4：用 SDK 嵌入 Pi](06e-实战SDK嵌入Pi.md) ｜ [下一章：第 7b 章 设计模式速查](07b-设计模式速查.md) →
+← [上一章：第 6f 章 调试与观测](06f-调试与观测.md) ｜ [下一章：第 7b 章 设计模式速查](07b-设计模式速查.md) →

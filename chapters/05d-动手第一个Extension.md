@@ -69,14 +69,14 @@ pi
 
 再改回来，加上"当用户要求查看网页、获取在线文档时使用"——模型又会自动调用了。
 
-> **关键理解**：`description` 是模型决定"要不要用这个工具"的唯一依据。它不是一个文档注释，而是一个**行为指令**——你要告诉模型**什么时候该用它**。
+> **关键理解**：`description` 是模型决定"要不要用这个工具"的主要依据之一。它不是一个文档注释，而是一个**行为指令**——你要告诉模型**什么时候该用它**。
 
 **核心要点解释**：
 
 - `import type { ExtensionAPI }` — 类型导入，不产生运行时代码
 - `Type.Object({ url: Type.String() })` — 用 typebox 定义参数的 JSON Schema，模型就是看这个 schema 知道该传什么参数
 - `execute` 返回的 `content` 是工具结果，会作为一条新 message 塞回对话——这就是第 1 章说的"结果喂回 messages"
-- `throw` 才算失败，`return` 一个值永远不会被标记为出错——这是 Pi 的设计约定
+- 抛异常或返回带 `isError: true` 的结果都能标记失败；普通返回默认不算失败
 
 ### 5d.3 Mini-lab B：事件拦截——拦住危险命令（约 8 行代码）
 
@@ -140,7 +140,7 @@ pi.on("tool_call", async (event, ctx) => {
 
 - `pi.on("tool_call", ...)` — 监听工具调用事件，**在工具真正执行之前**运行
 - `return { block: true, reason: "..." }` — 阻止这个工具调用，`reason` 会作为工具结果返回给模型
-- `ctx.ui.confirm` — 弹出确认框，返回 `true`/`false`。只在交互模式（TUI）下有效
+- `ctx.ui.confirm` — 弹出确认框，返回 `true`/`false`。TUI 和支持扩展 UI 协议的 RPC 客户端可用；print/JSON 模式不可用，可先检查 `ctx.hasUI`
 - 这跟 Mini-lab A 的 `registerTool` 是完全不同的"挂钩点"——一个是**给模型加新能力**，一个是**在已有能力上加检查**
 
 ### 5d.4 两个 Mini-lab 的关系
@@ -169,27 +169,24 @@ Mini-lab B (pi.on tool_call)  →  模型已有的"动作"被加了一道检查
 
 ### 5d.6 可选练习
 
-**练习 1**：给 `fetch_url` 工具加上超时处理和错误处理：
+**练习 1**：用下面的方法替换 `fetch_url` 注册对象里的 `execute`。超时覆盖响应头和正文读取；HTTP 失败和请求异常通过抛错交给 Pi 标记为工具失败：
 
 ```typescript
 async execute(_toolCallId, params) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 10000);
   try {
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 10000);
     const res = await fetch(params.url, { signal: controller.signal });
-    clearTimeout(timeout);
-    if (!res.ok) {
-      return { content: [{ type: "text", text: `HTTP ${res.status}` }], details: {} };
-    }
+    if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const text = await res.text();
     return { content: [{ type: "text", text: text.slice(0, 5000) }], details: { url: params.url, status: res.status } };
-  } catch (e) {
-    return { content: [{ type: "text", text: `请求失败：${e}` }], details: {} };
+  } finally {
+    clearTimeout(timeout);
   }
 }
 ```
 
-**练习 2**：把 Mini-lab B 改成"只拦截但不弹框"——直接 block 所有 `rm -rf`，不给确认机会：
+**练习 2**：把 Mini-lab B 改成"只拦截但不弹框"——直接 block 包含字面子串 `rm -rf` 的调用，不给确认机会：
 
 ```typescript
 if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
@@ -197,7 +194,7 @@ if (event.toolName === "bash" && event.input.command?.includes("rm -rf")) {
 }
 ```
 
-这就是"硬约束"的极致形态——模型"想不听话"也做不到。
+命中的调用会在执行前被代码阻止。但这里只演示字面子串匹配，`rm -fr`、`rm -r -f` 等写法不会命中，不能用它保证禁止删除行为；更完整的边界与局限见第 6b 章。
 
 ### 5d.7 本章要点
 

@@ -44,7 +44,7 @@ Pi 的 SDK 提供 `createAgentSession()`，可以在 Extension 内部**创建另
               └── 完成后返回一段文字给主会话
 ```
 
-子会话的生命周期：创建 → `prompt()` 发送任务 → `subscribe()` 收集输出 → `dispose()` 清理。对主会话来说，`delegate_to_reviewer` 跟调用 `read`、`bash` 没有任何区别——都是"调一个工具，拿一段文字结果"。
+子会话的生命周期：创建 → `subscribe()` 订阅输出 → `prompt()` 发送任务 → `dispose()` 清理。对主会话来说，`delegate_to_reviewer` 跟调用 `read`、`bash` 没有任何区别——都是"调一个工具，拿一段文字结果"。
 
 ### 6a.3 代码
 
@@ -95,6 +95,7 @@ async function roleLoader(cwd: string, prompt: string) {
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
+    noExtensions: true, // 子会话只使用下方显式工具，避免自动执行项目/全局扩展
     systemPromptOverride: () => prompt, // 替换基础系统提示词，只给角色人设
     appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
   });
@@ -120,6 +121,7 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      signal?.throwIfAborted();
       const modelRuntime = await getRuntime();
 
       // 创建子 Agent 会话——独立的对话历史、独立的工具集
@@ -134,15 +136,13 @@ export default function (pi: ExtensionAPI) {
       // 把取消信号接到子 session 上：
       // 用户/上层一旦中止，正在跑的 Reviewer 也要立刻停下
       const onAbort = () => void session.abort();
-      if (signal?.aborted) {
-        onAbort();
-      } else {
-        signal?.addEventListener("abort", onAbort, { once: true });
-      }
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       // 收集子 Agent 的文字输出
       let output = "";
       const unsubscribe = session.subscribe((event) => {
+        // prompt 的异步准备阶段也可能收到取消；等循环启动时再次中止。
+        if (event.type === "agent_start" && signal?.aborted) onAbort();
         if (
           event.type === "message_update" &&
           event.assistantMessageEvent.type === "text_delta"
@@ -152,7 +152,13 @@ export default function (pi: ExtensionAPI) {
       });
 
       try {
+        signal?.throwIfAborted();
         await session.prompt(params.task);
+        signal?.throwIfAborted();
+        const last = session.state.messages.at(-1);
+        if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+          throw new Error(last.errorMessage || `子 Agent 未正常完成：${last.stopReason}`);
+        }
       } finally {
         unsubscribe?.();
         signal?.removeEventListener("abort", onAbort);
@@ -176,7 +182,7 @@ export default function (pi: ExtensionAPI) {
 
 - **`SessionManager`** — "会话存哪"的策略对象。`SessionManager.inMemory()` 表示"这个子会话的历史只存在内存里，跑完就丢，不写文件"。对应地，CLI 里你用的会话是持久化到磁盘的——那用的是另一种 SessionManager。这里要的就是即用即弃的临时会话。
 
-- **`session`（`createAgentSession` 返回的）** — "一个独立 Agent 会话的句柄"。拿到它就等于拥有了一段独立的 Agent Loop：`session.prompt(任务)` 驱动它去想问题、`session.subscribe(回调)` 订阅它吐出的文字和事件、`session.abort()` 打断它、`session.dispose()` 清理资源。这四个方法就是你对一个子会话能做的全部操作。理解了"session = 一段可驱动的独立 Agent Loop"，这章的代码就读懂了一半。
+- **`session`（`createAgentSession` 返回的）** — "一个独立 Agent 会话的句柄"。拿到它就等于拥有了一段独立的 Agent Loop：`session.prompt(任务)` 驱动它去想问题、`session.subscribe(回调)` 订阅它吐出的文字和事件、`session.abort()` 打断它、`session.dispose()` 清理资源。本例主要使用这四个方法；会话还有状态读取、排队消息等接口。理解了"session = 一段可驱动的独立 Agent Loop"，这章的代码就读懂了一半。
 
 下面按代码顺序逐段看。
 
@@ -194,7 +200,7 @@ const REVIEWER_PROMPT = "你是代码审查员。只读代码，不要修改任�
 const REVIEWER_TOOLS = ["read", "grep", "find", "ls"];
 ```
 
-只给只读工具——Reviewer 在物理上拿不到 `write`/`edit`/`bash`，不是靠 prompt 说"别改代码"。这就是第 5d 章 Mini-lab B 讲的"硬约束"思路的体现。
+先用 `noExtensions: true` 关闭自动扩展加载，再只给只读内置工具——Reviewer 在工具接口上拿不到 `write`/`edit`/`bash`，不是靠 prompt 说"别改代码"。这就是第 5d 章 Mini-lab B 讲的"硬约束"思路的体现。
 
 **③ 创建子会话**
 
@@ -207,6 +213,7 @@ async function roleLoader(cwd: string, prompt: string) {
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
+    noExtensions: true, // 禁止子会话自动执行项目/全局扩展
     systemPromptOverride: () => prompt,    // 替换基础系统提示词，只给角色人设
     appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
   });
@@ -250,15 +257,14 @@ await session.prompt(params.task);
 代码里在 `subscribe` 之前还有几行容易被略过但很重要的逻辑：
 
 ```typescript
+signal?.throwIfAborted();
 const onAbort = () => void session.abort();
-if (signal?.aborted) {
-  onAbort();
-} else {
-  signal?.addEventListener("abort", onAbort, { once: true });
-}
+signal?.addEventListener("abort", onAbort, { once: true });
+// 在已有 subscribe 回调里补上：
+// if (event.type === "agent_start" && signal?.aborted) onAbort();
 ```
 
-这里的 **`signal`** 是 `execute` 参数里的第三个参数（第 5 章讲 `execute` 五参数时提过它）——一个 `AbortSignal`，代表"这次工具调用被取消了吗"。一旦上层（用户按了停止、或 Leader 被中止）触发取消，`signal` 就会 abort。这几行做的是：监听 `signal`，一旦它 abort 就立刻调 `session.abort()` 把子会话也打断——否则用户取消了 Leader，Reviewer 还在后台傻跑。第 6d 章会更详细地讲这个模式。
+这里的 **`signal`** 是 `execute` 参数里的第三个参数（第 5 章讲 `execute` 五参数时提过它）——一个 `AbortSignal`，代表"这次工具调用被取消了吗"。一旦上层（用户按了停止、或 Leader 被中止）触发取消，`signal` 就会 abort。这几行做的是：监听 `signal`，一旦它 abort 就立刻调 `session.abort()` 把子会话也打断——否则用户取消了 Leader，Reviewer 还在后台继续运行。只调用一次 `abort()` 不能阻止尚未启动的会话，所以完整代码在入口、`prompt` 前后检查取消状态，并在 `agent_start` 时再次检查，覆盖异步初始化期间的取消。第 6d 章会更详细地讲这个模式。
 
 **⑤ 清理**
 
@@ -294,8 +300,8 @@ Pi 写完后，再让它审查：
 ### 6a.6 排错提示
 
 - **工具不出现**：确认 `/trust` 和 `/reload`，扩展只在信任后加载
-- **Reviewer 什么都不返回**：检查 `params.task` 里有没有给足够上下文（比如文件路径），Reviewer 不知道该读什么文件
-- **Reviewer 修改了文件**：不可能——`REVIEWER_TOOLS` 里没有 `write`/`edit`。如果发生了说明你的工具白名单没生效，检查 `tools` 选项是否传对了
+- **Reviewer 什么都不返回**：先看工具是否报告认证、模型服务或取消错误；完整代码会把这些异常抛给上层。若正常结束却无文字，再检查 `params.task` 是否给足文件路径等上下文
+- **Reviewer 修改了文件**：本例关闭自动扩展加载，且白名单只开放只读内置工具。检查 `noExtensions` 和 `tools` 是否保留、是否另外注入了有写入能力的自定义工具；工具白名单不隔离当前 Node.js 进程
 - **子会话很慢**：`getRuntime()` 做了缓存，第一次调用初始化模型配置会慢，后续会快
 
 ### 6a.7 从这里到 Ch6d

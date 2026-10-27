@@ -11,7 +11,7 @@
 //   1. Reviewer 不再靠"回复必须以 APPROVED/REJECTED 开头"这种字符串前缀软约束，
 //      而是给它一个专属工具 submit_review，强制以结构化参数交付审查结论——
 //      工具参数是硬约束，模型讲话格式是软约束，前者更可靠。
-//   2. 加入代码层的重试熔断：coder 被连续 delegate 的次数超过上限后，
+//   2. 加入代码层的重试熔断：coder 在一轮 /team 中被 delegate 的总次数超过上限后，
 //      delegate 工具会直接拒绝执行并提示 Leader 停止循环、如实汇报，
 //      不再完全依赖 prompt 里"最多重试几次"这句话来自我约束。
 //   3. 子 Agent 现在会监听工具调用的 abort signal，一旦上层调用被取消，
@@ -87,6 +87,7 @@ async function roleLoader(cwd: string, prompt: string) {
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
+    noExtensions: true, // 子会话只使用下方显式工具，避免自动执行项目/全局扩展
     systemPromptOverride: () => prompt,
     appendSystemPromptOverride: () => [],
   });
@@ -132,10 +133,11 @@ export default function (pi: ExtensionAPI) {
         "如果 reviewer 返回的 verdict 是 rejected，把审查意见连同原任务再派给 coder 修复。",
       "delegate 工具：reviewer 的结论是结构化的 verdict 字段（approved/rejected），" +
         "以此判断是否通过，不要凭空猜测或依赖它的自然语言措辞。",
-      "delegate 工具：coder 的返工次数有上限，如果工具返回里出现"
+      "delegate 工具：coder 的派单总次数有上限，如果工具返回里出现"
         + "'CIRCUIT_BREAKER'，说明已达上限，必须立刻停止循环，如实向用户汇报未解决的问题。",
     ],
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      signal?.throwIfAborted();
       const role = params.role as RoleName;
 
       // --- 重试熔断：超过上限直接拒绝，不再创建子 Agent ---
@@ -165,6 +167,7 @@ export default function (pi: ExtensionAPI) {
       // reviewer 专属：submit_review 结构化交付工具。
       // 用闭包变量捕获这次调用里 reviewer 提交的结论，而不是去解析自由文本。
       let capturedVerdict: { verdict: "approved" | "rejected"; comments: string } | null = null;
+      let reviewSubmissionFailed = false;
       const customTools: ToolDefinition[] =
         role === "reviewer"
           ? [
@@ -203,14 +206,16 @@ export default function (pi: ExtensionAPI) {
       const onAbort = () => {
         void session.abort();
       };
-      if (signal?.aborted) {
-        onAbort();
-      } else {
-        signal?.addEventListener("abort", onAbort, { once: true });
-      }
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       let output = "";
       const unsubscribe = session.subscribe((event) => {
+        // prompt 的异步准备阶段也可能收到取消；等循环启动时再次中止。
+        if (event.type === "agent_start" && signal?.aborted) onAbort();
+        if (event.type === "tool_execution_end" && event.toolName === "submit_review" && event.isError) {
+          // 无效参数会在 execute 前被拒绝，不能继续沿用先前的 approved。
+          reviewSubmissionFailed = true;
+        }
         if (
           event.type === "message_update" &&
           event.assistantMessageEvent.type === "text_delta"
@@ -220,7 +225,13 @@ export default function (pi: ExtensionAPI) {
       });
 
       try {
+        signal?.throwIfAborted();
         await session.prompt(params.task);
+        signal?.throwIfAborted();
+        const last = session.state.messages.at(-1);
+        if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+          throw new Error(last.errorMessage || `子 Agent 未正常完成：${last.stopReason}`);
+        }
       } finally {
         unsubscribe?.();
         signal?.removeEventListener("abort", onAbort);
@@ -230,7 +241,7 @@ export default function (pi: ExtensionAPI) {
       // reviewer 角色：优先返回结构化结论；如果模型没按要求调用 submit_review
       // （极端情况下发生），退化为把原始文字返回给 Leader，而不是假装有结论。
       if (role === "reviewer") {
-        if (capturedVerdict) {
+        if (capturedVerdict && !reviewSubmissionFailed) {
           const verdict: { verdict: "approved" | "rejected"; comments: string } = capturedVerdict;
           return {
             content: [
@@ -247,7 +258,7 @@ export default function (pi: ExtensionAPI) {
             {
               type: "text",
               text:
-                "REVIEWER_DID_NOT_SUBMIT: reviewer 没有调用 submit_review 就结束了，" +
+                "REVIEWER_DID_NOT_SUBMIT: reviewer 未提交结论，或本轮 submit_review 曾失败，" +
                 "以下是它的原始文字，不能视为可靠结论，请重新 delegate 给 reviewer：\n" +
                 (output || "(无输出)"),
             },
@@ -285,7 +296,7 @@ export default function (pi: ExtensionAPI) {
         "4. reviewer 的结果里会带结构化的 verdict 字段：",
         "   - verdict 是 rejected：把 comments 里的意见连同原任务再 delegate 给 coder 修复，回到第 3 步。",
         "   - verdict 是 approved：向用户总结整个过程和最终结果，然后结束。",
-        `5. 如果 delegate 的返回内容里出现 CIRCUIT_BREAKER，说明返工次数已达上限（${MAX_CODER_DELEGATIONS} 次），`,
+        `5. 如果 delegate 的返回内容里出现 CIRCUIT_BREAKER，说明 coder 派单总次数已达上限（${MAX_CODER_DELEGATIONS} 次，含首次实现），`,
         "   必须立刻停止循环，如实向用户汇报当前还没解决的问题，不要再尝试 delegate 给 coder。",
         "",
         `现在的需求是：${requirement}`,

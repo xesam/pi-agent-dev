@@ -8,5 +8,10 @@
     "@earendil-works/pi-coding-agent": "*",
     "@earendil-works/pi-ai": "*",
     "typebox": "*"
+  },
+  "pi": {
+    "extensions": [
+      "./.pi/extensions"
+    ]
   }
 }

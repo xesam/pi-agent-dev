@@ -21,6 +21,7 @@ async function reviewerLoader(cwd: string, prompt: string) {
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
+    noExtensions: true, // 子会话只使用下方显式工具，避免自动执行项目/全局扩展
     systemPromptOverride: () => prompt,   // 替换基础系统提示词为审查员人设
     appendSystemPromptOverride: () => [], // 不追加默认 prompt
   });
@@ -58,7 +59,7 @@ async function main() {
         verdict: StringEnum(["approved", "rejected"] as const),
         comments: Type.String({ minLength: 1 }),
       }),
-      async execute(_id, params) {
+      async execute(_id, params: ReviewVerdict) {
         // 除 Schema 外再检查一次；无效提交不能沿用先前的通过结论。
         result.value = null;
         if ((params.verdict !== "approved" && params.verdict !== "rejected") ||
@@ -73,6 +74,7 @@ async function main() {
   });
 
   let toolCallCount = 0;
+  let reviewSubmissionFailed = false;
   try {
     session.subscribe((event) => {
       if (event.type === "message_update" &&
@@ -81,14 +83,22 @@ async function main() {
       } else if (event.type === "tool_execution_start") {
         toolCallCount++;
         console.error(`  [工具调用] ${event.toolName}`);
+      } else if (event.type === "tool_execution_end" && event.toolName === "submit_review" && event.isError) {
+        // Schema 校验失败不会进入 execute；锁存失败，防止沿用旧 approved。
+        reviewSubmissionFailed = true;
       }
     });
     await session.prompt(`审查以下 git diff：\n\n\`\`\`diff\n${diff}\n\`\`\``);
+    const last = session.state.messages.at(-1);
+    if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+      throw new Error(last.errorMessage || `审查未正常完成：${last.stopReason}`);
+    }
   } finally {
     session.dispose();
   }
 
   console.log(`\n工具调用次数：${toolCallCount}`);
+  if (reviewSubmissionFailed) throw new Error("REVIEW_SUBMISSION_FAILED: 结构化提交曾失败，请重新运行审查");
   const review = result.value;
   if (!review) throw new Error("REVIEWER_DID_NOT_SUBMIT: 未提交有效的结构化结论");
   console.log(`结论：${review.verdict}\n理由：${review.comments}`);

@@ -45,9 +45,9 @@
 
 记住这个对比。下面 6.3 节里会看到三处一模一样的套路：
 
-> 1. PM/Reviewer 被限制成只读工具集——不是靠 prompt 说"别改代码"，而是物理上拿不到 `write`/`edit`。
+> 1. 子会话关闭自动扩展加载，PM/Reviewer 被限制成只读内置工具集——不是靠 prompt 说"别改代码"，而是物理上拿不到 `write`/`edit`。
 > 2. Reviewer 的审查结论用一个专属工具 `submit_review` 结构化提交（`verdict: "approved"|"rejected"`），而不是靠"回复必须以 APPROVED 开头"这种字符串前缀去猜。
-> 3. Coder 的返工次数在代码里设了硬上限（`MAX_CODER_DELEGATIONS`），超限后 `delegate` 直接拒绝执行，而不是只在 prompt 里写"最多重试几次"指望模型自觉遵守。
+> 3. Coder 的派单总次数（含首次实现）在代码里设了硬上限（`MAX_CODER_DELEGATIONS`），超限后 `delegate` 直接拒绝执行，而不是只在 prompt 里写"最多重试几次"指望模型自觉遵守。
 
 ### 6.2 项目结构
 
@@ -91,7 +91,7 @@ my-team-project/
 //   1. Reviewer 不再靠"回复必须以 APPROVED/REJECTED 开头"这种字符串前缀软约束，
 //      而是给它一个专属工具 submit_review，强制以结构化参数交付审查结论——
 //      工具参数是硬约束，模型讲话格式是软约束，前者更可靠。
-//   2. 加入代码层的重试熔断：coder 被连续 delegate 的次数超过上限后，
+//   2. 加入代码层的重试熔断：coder 在一轮 /team 中被 delegate 的总次数超过上限后，
 //      delegate 工具会直接拒绝执行并提示 Leader 停止循环、如实汇报，
 //      不再完全依赖 prompt 里"最多重试几次"这句话来自我约束。
 //   3. 子 Agent 现在会监听工具调用的 abort signal，一旦上层调用被取消，
@@ -167,6 +167,7 @@ async function roleLoader(cwd: string, prompt: string) {
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
+    noExtensions: true, // 子会话只使用下方显式工具，避免自动执行项目/全局扩展
     systemPromptOverride: () => prompt,
     appendSystemPromptOverride: () => [],
   });
@@ -212,10 +213,11 @@ export default function (pi: ExtensionAPI) {
         "如果 reviewer 返回的 verdict 是 rejected，把审查意见连同原任务再派给 coder 修复。",
       "delegate 工具：reviewer 的结论是结构化的 verdict 字段（approved/rejected），" +
         "以此判断是否通过，不要凭空猜测或依赖它的自然语言措辞。",
-      "delegate 工具：coder 的返工次数有上限，如果工具返回里出现"
+      "delegate 工具：coder 的派单总次数有上限，如果工具返回里出现"
         + "'CIRCUIT_BREAKER'，说明已达上限，必须立刻停止循环，如实向用户汇报未解决的问题。",
     ],
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      signal?.throwIfAborted();
       const role = params.role as RoleName;
 
       // --- 重试熔断：超过上限直接拒绝，不再创建子 Agent ---
@@ -245,6 +247,7 @@ export default function (pi: ExtensionAPI) {
       // reviewer 专属：submit_review 结构化交付工具。
       // 用闭包变量捕获这次调用里 reviewer 提交的结论，而不是去解析自由文本。
       let capturedVerdict: { verdict: "approved" | "rejected"; comments: string } | null = null;
+      let reviewSubmissionFailed = false;
       const customTools: ToolDefinition[] =
         role === "reviewer"
           ? [
@@ -283,14 +286,16 @@ export default function (pi: ExtensionAPI) {
       const onAbort = () => {
         void session.abort();
       };
-      if (signal?.aborted) {
-        onAbort();
-      } else {
-        signal?.addEventListener("abort", onAbort, { once: true });
-      }
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       let output = "";
       const unsubscribe = session.subscribe((event) => {
+        // prompt 的异步准备阶段也可能收到取消；等循环启动时再次中止。
+        if (event.type === "agent_start" && signal?.aborted) onAbort();
+        if (event.type === "tool_execution_end" && event.toolName === "submit_review" && event.isError) {
+          // 无效参数会在 execute 前被拒绝，不能继续沿用先前的 approved。
+          reviewSubmissionFailed = true;
+        }
         if (
           event.type === "message_update" &&
           event.assistantMessageEvent.type === "text_delta"
@@ -300,7 +305,13 @@ export default function (pi: ExtensionAPI) {
       });
 
       try {
+        signal?.throwIfAborted();
         await session.prompt(params.task);
+        signal?.throwIfAborted();
+        const last = session.state.messages.at(-1);
+        if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+          throw new Error(last.errorMessage || `子 Agent 未正常完成：${last.stopReason}`);
+        }
       } finally {
         unsubscribe?.();
         signal?.removeEventListener("abort", onAbort);
@@ -310,7 +321,7 @@ export default function (pi: ExtensionAPI) {
       // reviewer 角色：优先返回结构化结论；如果模型没按要求调用 submit_review
       // （极端情况下发生），退化为把原始文字返回给 Leader，而不是假装有结论。
       if (role === "reviewer") {
-        if (capturedVerdict) {
+        if (capturedVerdict && !reviewSubmissionFailed) {
           const verdict: { verdict: "approved" | "rejected"; comments: string } = capturedVerdict;
           return {
             content: [
@@ -327,7 +338,7 @@ export default function (pi: ExtensionAPI) {
             {
               type: "text",
               text:
-                "REVIEWER_DID_NOT_SUBMIT: reviewer 没有调用 submit_review 就结束了，" +
+                "REVIEWER_DID_NOT_SUBMIT: reviewer 未提交结论，或本轮 submit_review 曾失败，" +
                 "以下是它的原始文字，不能视为可靠结论，请重新 delegate 给 reviewer：\n" +
                 (output || "(无输出)"),
             },
@@ -365,7 +376,7 @@ export default function (pi: ExtensionAPI) {
         "4. reviewer 的结果里会带结构化的 verdict 字段：",
         "   - verdict 是 rejected：把 comments 里的意见连同原任务再 delegate 给 coder 修复，回到第 3 步。",
         "   - verdict 是 approved：向用户总结整个过程和最终结果，然后结束。",
-        `5. 如果 delegate 的返回内容里出现 CIRCUIT_BREAKER，说明返工次数已达上限（${MAX_CODER_DELEGATIONS} 次），`,
+        `5. 如果 delegate 的返回内容里出现 CIRCUIT_BREAKER，说明 coder 派单总次数已达上限（${MAX_CODER_DELEGATIONS} 次，含首次实现），`,
         "   必须立刻停止循环，如实向用户汇报当前还没解决的问题，不要再尝试 delegate 给 coder。",
         "",
         `现在的需求是：${requirement}`,
@@ -383,9 +394,9 @@ export default function (pi: ExtensionAPI) {
 2. **`tools: roleConfig.tools` 是安全边界** —— PM 和 Reviewer 被限制成只读工具，物理上就不可能手滑改代码，不需要靠"提示词说别改代码"这种软约束。这是本教程反复强调的一个原则：**能用工具白名单做的约束，就不要只靠 prompt 去"求"模型遵守**。
 3. **`appendSystemPromptOverride: () => []`** 是一个容易踩的坑——如果不设置，Pi 会自动把 `APPEND_SYSTEM.md` 追加到你精心定制的角色 prompt 后面，导致角色人设被"污染"。同理，注意这个 override 现在配在 `DefaultResourceLoader` 上而不是 `createAgentSession` 的选项里，而且自带的 loader 要手动 `await loader.reload()`——`createAgentSession` 只 reload 它自己创建的默认 loader。
 4. **子 Agent 通过 `subscribe` 收集 `text_delta` 拼出完整回复**，再作为 `delegate` 工具的返回值交回给 Leader（主 Agent）。对 Leader 来说，`delegate` 跟调用 `read`、`bash` 没有任何区别——都是"调用一个工具，拿到一段文字结果"，这正是这套设计的优雅之处：**多 Agent 协作，对外表现就是"一个普通工具调用"**。
-5. **Reviewer 的结论用 `submit_review` 这个专属工具结构化提交，而不是解析文字前缀**——`delegate` 工具给 `role === "reviewer"` 的子 session 额外注入了一个只有它能用的 `customTools`，模型必须调用 `submit_review({ verdict, comments })` 才能把结论带出来。工具参数是 JSON Schema 校验过的硬数据，比"要求模型的回复必须以 APPROVED 开头"这种字符串前缀可靠得多——万一模型说"基本没问题，APPROVED"，字符串前缀匹配就会失败，但结构化参数不会。如果模型没调用 `submit_review` 就结束了（极端情况），代码会诚实地把这种"结论缺失"标记出来（`REVIEWER_DID_NOT_SUBMIT`），而不是假装解析出了一个结果。
-6. **`MAX_CODER_DELEGATIONS` 是代码层的重试熔断**——只在 prompt 里写"最多重试 3 次"是软约束，模型可能不遵守（比如陷入"再试一次"的执念）。这里用一个模块级计数器 `coderDelegationCount`，每次 `delegate` 到 `coder` 就自增，超过上限后 `delegate` 直接返回 `CIRCUIT_BREAKER` 标记而不再创建子 Agent，逼 Leader 停止循环、如实汇报。`/team` 命令在每次启动新一轮协作时会重置这个计数器。
-7. **子 Agent 会监听取消信号**——`execute` 的第三个参数 `signal` 是当前这次 `delegate` 工具调用的 `AbortSignal`。代码里给它挂了一个 `abort` 监听器，一旦触发就调用子 `session.abort()`。这样如果用户中途取消了 Leader 的操作（或者 Leader 所在的工具调用被外部终止），正在跑的 Coder 子会话（它持有 `bash`/`write`，如果放任不管可能会继续改文件）也会被一并叫停。注意：Pi 的 `createAgentSession`/`prompt` 本身并不接受一个 `signal` 选项来"传入"取消信号，能拿到的取消信号只在工具的 `execute` 参数里；能中断子 session 的手段是它自带的 `session.abort()` 方法，两者要对应起来用，不要指望把 `signal` 直接塞进 `createAgentSession` 的选项里。
+5. **Reviewer 的结论用 `submit_review` 这个专属工具结构化提交，而不是解析文字前缀**——`delegate` 工具给 `role === "reviewer"` 的子 session 额外注入了一个只有它能用的 `customTools`，模型必须调用 `submit_review({ verdict, comments })` 才能把结论带出来。工具参数是 JSON Schema 校验过的硬数据，比"要求模型的回复必须以 APPROVED 开头"这种字符串前缀可靠得多——万一模型说"基本没问题，APPROVED"，字符串前缀匹配就会失败，但结构化参数不会。如果模型没调用 `submit_review` 就结束了，或者本轮任意一次提交失败，代码会返回 `REVIEWER_DID_NOT_SUBMIT`。Schema 校验失败发生在 `execute` 之前，因此还要监听 `tool_execution_end` 锁存失败；即使曾提交过 `approved`，本轮也不再采纳，避免旧结论被误当成有效交付。
+6. **`MAX_CODER_DELEGATIONS` 是代码层的重试熔断**——只在 prompt 里写"最多重试 3 次"是软约束，模型可能不遵守（比如陷入"再试一次"的执念）。这里用一个模块级计数器 `coderDelegationCount`，每次 `delegate` 到 `coder` 就自增；上限 4 次包含首次实现，因此最多还有 3 次返工。达到上限后，再次派单时 `delegate` 直接返回 `CIRCUIT_BREAKER` 标记而不再创建子 Agent，逼 Leader 停止循环、如实汇报。`/team` 命令在每次启动新一轮协作时会重置这个计数器。
+7. **子 Agent 会监听取消信号**——`execute` 的第三个参数 `signal` 是当前这次 `delegate` 工具调用的 `AbortSignal`。入口和 `prompt` 前后先检查是否已取消；`agent_start` 监听补上 `prompt` 异步准备期间的取消空窗。代码里给它挂了一个 `abort` 监听器，一旦触发就调用子 `session.abort()`。这样如果用户中途取消了 Leader 的操作（或者 Leader 所在的工具调用被外部终止），正在跑的 Coder 子会话（它持有 `bash`/`write`，如果放任不管可能会继续改文件）也会被一并叫停。注意：Pi 的 `createAgentSession`/`prompt` 本身并不接受一个 `signal` 选项来"传入"取消信号，能拿到的取消信号只在工具的 `execute` 参数里；能中断子 session 的手段是它自带的 `session.abort()` 方法，两者要对应起来用，不要指望把 `signal` 直接塞进 `createAgentSession` 的选项里。
 
 ### 6.4 试跑
 
@@ -408,7 +419,7 @@ pi
 2. 工具返回 PM 拆出的任务列表和验收标准
 3. Leader 调用 `delegate role=coder ...`，Coder 子会话真的去 `write`/`edit`/`bash`
 4. Leader 调用 `delegate role=reviewer ...` 审查，Reviewer 内部调用 `submit_review` 提交结构化结论
-5. 如果返回的 `verdict` 是 `rejected`，Leader 会自动把 `comments` 打回 Coder，重复 3-4；如果连续打回次数超过 `MAX_CODER_DELEGATIONS`，`delegate` 会返回 `CIRCUIT_BREAKER`，Leader 必须停止循环并如实汇报
+5. 如果返回的 `verdict` 是 `rejected`，Leader 会自动把 `comments` 打回 Coder，重复 3-4；Coder 调用总次数达到 `MAX_CODER_DELEGATIONS`（首次实现 1 次 + 最多返工 3 次）后，再次派单时 `delegate` 会返回 `CIRCUIT_BREAKER`，Leader 必须停止循环并如实汇报
 6. `verdict` 是 `approved` 后，Leader 用自己的话向你总结整个过程
 
 把上面这六步展开成一次真实的调用链（以"被驳回一次、再通过"的典型情况为例），消息是这样在角色间传递的：
@@ -432,14 +443,14 @@ Leader:  → 向用户总结全过程
 
 在调用过程中你可以直接看到每次 `delegate` 工具调用的参数（角色+任务）和返回内容，这就是"多角色协作"最直观的调试方式。
 
-也可以单独调试某个角色的 system prompt，不走 Leader：临时改 `promptGuidelines`，或者直接写一个新的 `pi -e` 测试脚本单独 new 一个 `createAgentSession` 试跑该角色的 prompt。
+也可以单独调试某个角色的 system prompt，不走 Leader：临时改 `promptGuidelines`，或者按第 6f 章写一个 Node.js SDK 脚本，单独调用 `createAgentSession` 试跑该角色的 prompt（`pi -e` 用于加载扩展）。
 
 ### 6.5 排错提示
 
 - **`/team` 没反应**：先确认项目已被 `/trust`，扩展只在信任后加载；改完代码记得 `/reload`。
 - **Reviewer 一直 rejected 但看不出哪里错**：给 `reviewer` 的 prompt 加一句"必须具体到文件名和行号"，逼它给出可执行的意见，而不是空泛评价。
-- **Reviewer 完成了检查但 `delegate` 返回 `REVIEWER_DID_NOT_SUBMIT`**：说明模型只用文字描述了结论，没有实际调用 `submit_review` 工具。检查它的 system prompt 是不是把"必须调用 submit_review"这句话写得足够醒目；也可以在 `promptGuidelines` 里再强调一次。
-- **一直触发 `CIRCUIT_BREAKER`，但其实任务快改好了**：说明 `MAX_CODER_DELEGATIONS`（默认 4）对这个任务偏小，按需调大；也可以顺便看看是不是 Reviewer 的验收标准定得过于苛刻，导致来回打回。
+- **Reviewer 完成了检查但 `delegate` 返回 `REVIEWER_DID_NOT_SUBMIT`**：说明模型没有提交结论，或本轮某次提交因参数无效而失败。先查看工具错误；若只有文字结论，再检查 system prompt 和 `promptGuidelines` 是否强调了必须调用 `submit_review`。
+- **一直触发 `CIRCUIT_BREAKER`，但其实任务快改好了**：说明 `MAX_CODER_DELEGATIONS`（默认总计 4 次，含首次实现）对这个任务偏小，按需调大；也可以顺便看看是不是 Reviewer 的验收标准定得过于苛刻，导致来回打回。
 - **Coder 好心却把不该改的文件也改了**：这属于"该用工具白名单而不是提示词"的经典场景——如果需要限制 Coder 能碰哪些目录，最稳的做法是再包一层自定义工具替代 `bash`/`write`，在 `execute` 里做路径校验并拒绝越界写入，而不是在 prompt 里加"不要动 xxx 目录"。
 - **子 Agent 每次都很慢**：注意示例里 `sharedModelRuntimePromise` 做了缓存，避免每次 `delegate` 都重新走一遍模型初始化；如果还是慢，检查是不是每个角色都开了不必要的高 thinking level。
 
@@ -459,7 +470,7 @@ Leader:  → 向用户总结全过程
 }
 ```
 
-因为扩展放在约定目录 `extensions/`（或本例中项目本身就是 `.pi/extensions/multi-role`），不写 `pi` 字段 Pi 也能按约定目录自动发现。想更明确可以显式加：
+Pi Package 的约定目录是包根目录下的 `extensions/`；本例的 `.pi/extensions/` 是项目自动发现目录，安装为包时需要在 `package.json` 中显式声明。配套示例已包含：
 
 ```json
 "pi": { "extensions": ["./.pi/extensions"] }

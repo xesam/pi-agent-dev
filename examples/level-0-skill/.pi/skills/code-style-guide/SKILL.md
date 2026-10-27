@@ -22,8 +22,8 @@ description: 团队编码规范。在编写或修改 TypeScript 代码时使用�
 - TODO 注释必须带日期和负责人：`// TODO(2024-01-15, zhang): ...`
 
 ## 使用风格检查脚本
-在提交前运行检查：
+在项目根目录运行检查（脚本路径相对项目根目录，`src/` 也是项目中的目录）：
 ```bash
-./scripts/check-style.sh src/
+bash .pi/skills/code-style-guide/scripts/check-style.sh src/
 ```
-脚本会扫描常见风格问题并输出报告。
+脚本只粗筛 `console.log` 和未使用 `TODO(...)` 标记的 TODO，不验证括号内的日期、负责人或其他规范；风格提示不影响退出码，目录不存在或扫描失败则非零退出。若 Skill 安装在其他位置，先以本 SKILL.md 所在目录定位 `scripts/check-style.sh`，仍从项目根目录运行。

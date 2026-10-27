@@ -42,6 +42,7 @@ async function roleLoader(cwd: string, prompt: string) {
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
+    noExtensions: true, // 子会话只使用下方显式工具，避免自动执行项目/全局扩展
     systemPromptOverride: () => prompt, // 替换基础系统提示词，只给角色人设
     appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
   });
@@ -67,6 +68,7 @@ export default function (pi: ExtensionAPI) {
     }),
 
     async execute(_toolCallId, params, signal, _onUpdate, ctx) {
+      signal?.throwIfAborted();
       const modelRuntime = await getRuntime();
 
       // 创建子 Agent 会话——独立的对话历史、独立的工具集
@@ -81,15 +83,13 @@ export default function (pi: ExtensionAPI) {
       // 把取消信号接到子 session 上：
       // 用户/上层一旦中止，正在跑的 Reviewer 也要立刻停下
       const onAbort = () => void session.abort();
-      if (signal?.aborted) {
-        onAbort();
-      } else {
-        signal?.addEventListener("abort", onAbort, { once: true });
-      }
+      signal?.addEventListener("abort", onAbort, { once: true });
 
       // 收集子 Agent 的文字输出
       let output = "";
       const unsubscribe = session.subscribe((event) => {
+        // prompt 的异步准备阶段也可能收到取消；等循环启动时再次中止。
+        if (event.type === "agent_start" && signal?.aborted) onAbort();
         if (
           event.type === "message_update" &&
           event.assistantMessageEvent.type === "text_delta"
@@ -99,7 +99,13 @@ export default function (pi: ExtensionAPI) {
       });
 
       try {
+        signal?.throwIfAborted();
         await session.prompt(params.task);
+        signal?.throwIfAborted();
+        const last = session.state.messages.at(-1);
+        if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+          throw new Error(last.errorMessage || `子 Agent 未正常完成：${last.stopReason}`);
+        }
       } finally {
         unsubscribe?.();
         signal?.removeEventListener("abort", onAbort);

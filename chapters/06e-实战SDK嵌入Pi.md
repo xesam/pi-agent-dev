@@ -63,6 +63,7 @@ async function reviewerLoader(cwd: string, prompt: string) {
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
+    noExtensions: true, // 子会话只使用下方显式工具，避免自动执行项目/全局扩展
     systemPromptOverride: () => prompt,   // 替换基础系统提示词为审查员人设
     appendSystemPromptOverride: () => [], // 不追加默认 prompt
   });
@@ -100,7 +101,7 @@ async function main() {
         verdict: StringEnum(["approved", "rejected"] as const),
         comments: Type.String({ minLength: 1 }),
       }),
-      async execute(_id, params) {
+      async execute(_id, params: ReviewVerdict) {
         // 除 Schema 外再检查一次；无效提交不能沿用先前的通过结论。
         result.value = null;
         if ((params.verdict !== "approved" && params.verdict !== "rejected") ||
@@ -115,6 +116,7 @@ async function main() {
   });
 
   let toolCallCount = 0;
+  let reviewSubmissionFailed = false;
   try {
     session.subscribe((event) => {
       if (event.type === "message_update" &&
@@ -123,14 +125,22 @@ async function main() {
       } else if (event.type === "tool_execution_start") {
         toolCallCount++;
         console.error(`  [工具调用] ${event.toolName}`);
+      } else if (event.type === "tool_execution_end" && event.toolName === "submit_review" && event.isError) {
+        // Schema 校验失败不会进入 execute；锁存失败，防止沿用旧 approved。
+        reviewSubmissionFailed = true;
       }
     });
     await session.prompt(`审查以下 git diff：\n\n\`\`\`diff\n${diff}\n\`\`\``);
+    const last = session.state.messages.at(-1);
+    if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+      throw new Error(last.errorMessage || `审查未正常完成：${last.stopReason}`);
+    }
   } finally {
     session.dispose();
   }
 
   console.log(`\n工具调用次数：${toolCallCount}`);
+  if (reviewSubmissionFailed) throw new Error("REVIEW_SUBMISSION_FAILED: 结构化提交曾失败，请重新运行审查");
   const review = result.value;
   if (!review) throw new Error("REVIEWER_DID_NOT_SUBMIT: 未提交有效的结构化结论");
   console.log(`结论：${review.verdict}\n理由：${review.comments}`);
@@ -160,6 +170,7 @@ const modelRuntime = await ModelRuntime.create();
 const loader = new DefaultResourceLoader({
   cwd,                                   // 工作目录
   agentDir: getAgentDir(),               // 全局配置目录
+  noExtensions: true,                    // 审查会话不自动执行项目扩展
   systemPromptOverride: () => "...",      // 自定义系统提示词
   appendSystemPromptOverride: () => [],  // 不追加默认内容
 });
@@ -206,7 +217,7 @@ session.dispose();
 
 **⑥ 结构化结论与退出码**
 
-`submit_review` 用枚举 Schema 限定 `approved/rejected`，并检查理由不为空。事件流中的自然语言只用于展示，不参与判定。通过退出 0，拒绝退出 1；缺少非空 diff、没有有效提交或运行异常退出 2。`submit_review` 虽是自定义工具，也必须列入 `tools` 白名单。
+`submit_review` 用枚举 Schema 限定 `approved/rejected`，并检查理由不为空。事件流中的自然语言只用于展示，不参与判定。通过退出 0，拒绝退出 1；缺少非空 diff、没有有效提交或运行异常退出 2。`submit_review` 虽是自定义工具，也必须列入 `tools` 白名单。Schema 校验可能在 `execute` 之前拒绝调用，因此还要监听失败的 `tool_execution_end`：本轮任意一次结构化提交失败都会锁存为异常、退出 2，即使前后曾提交 `approved` 也不能放行，需要重新运行完整审查。模型以 `error` 或 `aborted` 结束也按异常处理，不能拿此前的结论判定通过。
 
 ### 6e.5 运行
 
@@ -220,7 +231,7 @@ node --experimental-strip-types ci-review.ts "$(git diff --cached)"
 # 缺少参数或暂存区没有改动时退出 2；不会自动调用 bash 获取 diff
 ```
 
-> **注意**：上面的 `--experimental-strip-types` 是 Node.js 22+ 直接运行 TypeScript 的方式。如果你的 Node 版本较低，可以用 `tsx ci-review.ts` 或先 `tsc` 编译。
+> **运行环境**：按所安装 Pi 包的 `engines.node` 选择 Node 版本；本次核验的 Pi 1.4.0 要求 Node.js ≥22.19.0。上面使用 Node 的类型擦除功能直接运行 `.ts`；`tsx` 或预先编译只改变 TypeScript 的运行方式，不能降低 Pi 自身的 Node 版本要求。
 
 ### 6e.6 SDK vs CLI：什么时候用哪个
 
@@ -236,6 +247,8 @@ node --experimental-strip-types ci-review.ts "$(git diff --cached)"
 **简单原则**：需要人机交互 → CLI；需要嵌入程序 → SDK。
 
 ### 6e.7 进阶：加载扩展和 Skill
+
+CI 示例关闭自动扩展发现，避免审查时执行待审仓库的扩展代码。下面单独演示显式加载可信项目资源的用法。
 
 SDK 不只是"裸" Agent——你也可以加载项目里的扩展和 Skill：
 

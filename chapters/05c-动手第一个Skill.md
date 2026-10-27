@@ -51,11 +51,11 @@ description: 团队编码规范。在编写或修改 TypeScript 代码时使用�
 - TODO 注释必须带日期和负责人：`// TODO(2024-01-15, zhang): ...`
 
 ## 使用风格检查脚本
-在提交前运行检查：
+在项目根目录运行检查（脚本路径相对项目根目录，`src/` 也是项目中的目录）：
 \`\`\`bash
-./scripts/check-style.sh src/
+bash .pi/skills/code-style-guide/scripts/check-style.sh src/
 \`\`\`
-脚本会扫描常见风格问题并输出报告。
+脚本只粗筛 `console.log` 和未使用 `TODO(...)` 标记的 TODO，不验证括号内的日期、负责人或其他规范；风格提示不影响退出码，目录不存在或扫描失败则非零退出。若 Skill 安装在其他位置，先以本 SKILL.md 所在目录定位 `scripts/check-style.sh`，仍从项目根目录运行。
 ```
 
 **注意 frontmatter 里的 `description`**——这是整条 Skill 最关键的字段。模型就是看它来决定"现在这个任务要不要去读完整的 SKILL.md"。写得好模型就会在写代码时自动加载它，写得差模型就会忽略它。
@@ -72,16 +72,37 @@ description: 团队编码规范。在编写或修改 TypeScript 代码时使用�
 
 ```bash
 #!/bin/bash
-# 简单的风格检查脚本
-DIR="${1:-src}"
-echo "扫描 $DIR ..."
-grep -rn "console\.log" "$DIR" 2>/dev/null && echo "⚠️  发现 console.log"
-grep -rn "TODO" "$DIR" 2>/dev/null | grep -v "TODO(" && echo "⚠️  发现未标记负责人的 TODO"
-echo "检查完成。"
+# 粗筛常见标记；不验证 TODO(...) 内的日期和负责人，也不作为提交门禁。
+SCAN_DIR="${1:-src}"
+if [[ ! -d "$SCAN_DIR" || ! -r "$SCAN_DIR" ]]; then
+  echo "无法扫描目录：$SCAN_DIR" >&2
+  exit 2
+fi
+
+scan_pattern() {
+  local matches status
+  if matches=$(grep -rnE -- "$1" "$SCAN_DIR"); then
+    printf '%s\n' "$matches"
+    echo "$2"
+  else
+    status=$?
+    # grep 的 1 表示无匹配，其他非零状态表示扫描失败。
+    if [[ "$status" -ne 1 ]]; then
+      echo "扫描失败：$SCAN_DIR" >&2
+      exit "$status"
+    fi
+  fi
+}
+
+echo "扫描 $SCAN_DIR ..."
+scan_pattern 'console\.log' '⚠️  发现 console.log'
+scan_pattern 'TODO([^(]|$)' '⚠️  发现未使用 TODO(...) 标记的 TODO'
+echo "检查完成（风格提示不影响退出码）。"
 ```
 
 ```bash
-chmod +x scripts/check-style.sh
+# 从项目根目录执行；前面的 bash 调用方式不要求可执行位
+chmod +x .pi/skills/code-style-guide/scripts/check-style.sh
 ```
 
 **第 4 步**：测试。

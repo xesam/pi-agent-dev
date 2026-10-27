@@ -10,7 +10,7 @@
 //   【收集】   代码 parseCsv()                —— 读文件不需要智能
 //   【筛选】   Analyst（LLM 子 Agent）把自然语言要求翻译成
 //              submit_filter 的结构化条件     —— 哪些行进报表是判断
-//   【计算】   代码 aggregateBy()/growthOf()  —— 求和、分组、增长率不交给模型
+//   【计算】   代码 aggregateBy()  —— 求和、分组、增长率不交给模型
 //   【洞察】   Analyst 阅读（代码算好的）聚合结果，
 //              用 submit_insights 交付结论    —— 写什么洞察是判断
 //   【渲染】   代码 renderReport()            —— 表格排版、竖线转义是计算
@@ -65,13 +65,21 @@ interface Insight {
 
 /** 解析 data/sales.csv。失败抛错，由工具层接住转成友好提示。 */
 function parseCsv(cwd: string): SalesRow[] {
-  const raw = readFileSync(join(cwd, "data", "sales.csv"), "utf8").trim();
-  const [header, ...lines] = raw.split("\n");
+  // 本示例只处理无引号、字段内不含逗号的 CSV；兼容 BOM 与 CRLF。
+  const raw = readFileSync(join(cwd, "data", "sales.csv"), "utf8").replace(/^\uFEFF/, "").trim();
+  const [header, ...lines] = raw.split(/\r?\n/);
   if (header !== "month,region,product,revenue,units") {
     throw new Error(`CSV 表头不符合预期：${header}`);
   }
-  return lines.map((line) => {
-    const [month, region, product, revenue, units] = line.split(",");
+  if (lines.length === 0) throw new Error("CSV 没有数据行");
+  return lines.map((line, index) => {
+    const cells = line.split(",").map((cell) => cell.trim());
+    const [month, region, product, revenue, units] = cells;
+    if (cells.length !== 5 || cells.some((cell) => !cell) ||
+        !/^\d{4}-(0[1-9]|1[0-2])$/.test(month) ||
+        !Number.isFinite(Number(revenue)) || !Number.isFinite(Number(units))) {
+      throw new Error(`CSV 第 ${index + 2} 行格式或数值无效`);
+    }
     return { month, region, product, revenue: Number(revenue), units: Number(units) };
   });
 }
@@ -84,7 +92,7 @@ function filterRows(rows: SalesRow[], filter: FilterSpec): SalesRow[] {
   );
 }
 
-/** 按维度分组求和：营收、销量、环比增长率（首月 → 末月）。 */
+/** 按维度分组求和：营收、销量、首末月增长率。 */
 function aggregateBy(rows: SalesRow[], dim: Dimension) {
   const groups = new Map<string, SalesRow[]>();
   for (const r of rows) {
@@ -111,7 +119,7 @@ function aggregateBy(rows: SalesRow[], dim: Dimension) {
 }
 
 /** 确定性渲染：竖线转义 + 数字格式化由代码保证，模型不参与格式。 */
-const fmt = (n: number) => n.toLocaleString();
+const fmt = (n: number) => n.toLocaleString("zh-CN");
 
 function formatMarkdownTable(headers: string[], body: string[][]): string {
   const escape = (s: string) => String(s).replace(/\|/g, "\\|");
@@ -169,6 +177,7 @@ async function roleLoader(cwd: string, prompt: string) {
   const loader = new DefaultResourceLoader({
     cwd,
     agentDir: getAgentDir(),
+    noExtensions: true, // 子会话只使用下方显式工具，避免自动执行项目/全局扩展
     systemPromptOverride: () => prompt, // 替换基础系统提示词为角色人设
     appendSystemPromptOverride: () => [], // 不让 APPEND_SYSTEM.md 污染角色人设
   });
@@ -209,6 +218,7 @@ export default function (pi: ExtensionAPI) {
       "analyze_sales 工具：返回的已经是渲染好的 Markdown 报表，直接展示给用户即可，不要再重新排版或复述数字。",
     ],
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
+      signal?.throwIfAborted();
       // 1.【收集】读文件失败不抛给用户，转成友好提示（详见 6c.5 常见坑）
       let allRows: SalesRow[];
       try {
@@ -253,6 +263,7 @@ export default function (pi: ExtensionAPI) {
           },
           {
             name: "submit_filter",
+            executionMode: "sequential", // 结构化交接按调用顺序处理，避免同批校验失败被旧提交覆盖
             label: "Submit structured filter",
             description:
               "提交结构化筛选条件（本任务第一步）。regions/products/months 缺省表示不过滤该维度；" +
@@ -261,9 +272,12 @@ export default function (pi: ExtensionAPI) {
               regions: Type.Optional(Type.Array(Type.String())),
               products: Type.Optional(Type.Array(Type.String())),
               months: Type.Optional(Type.Array(Type.String())),
-              groupBy: Type.Array(StringEnum(DIMENSIONS)),
+              groupBy: Type.Array(StringEnum(DIMENSIONS), { minItems: 1, uniqueItems: true }),
             }),
             async execute(_id, p: FilterSpec) {
+              // 新条件使旧表与洞察失效，避免重试失败后沿用旧结果。
+              capturedFilter = null;
+              capturedInsights = null;
               // 校验不过就不捕获、返回错误文本，让模型修正后重新提交
               const check = (label: string, given: string[] | undefined, valid: string[]) => {
                 const bad = (given ?? []).filter((v) => !valid.includes(v));
@@ -274,8 +288,6 @@ export default function (pi: ExtensionAPI) {
                 check("products", p.products, validProducts) ??
                 check("months", p.months, validMonths);
               if (err) return { content: [{ type: "text", text: `筛选条件有误：${err}` }], details: {} };
-              if (p.groupBy.length === 0)
-                return { content: [{ type: "text", text: "groupBy 不能为空，请至少选择一个汇总维度。" }], details: {} };
               const filtered = filterRows(allRows, p);
               if (filtered.length === 0)
                 return { content: [{ type: "text", text: "筛选结果为空，请放宽条件后重新提交。" }], details: {} };
@@ -298,17 +310,22 @@ export default function (pi: ExtensionAPI) {
           },
           {
             name: "submit_insights",
+            executionMode: "sequential", // 结构化交接按调用顺序处理，避免同批校验失败被旧提交覆盖
             label: "Submit key insights",
             description: "提交 1-3 条关键洞察（本任务第二步，也是最终交付）。evidence 必须引用聚合结果里的具体数字。",
             parameters: Type.Object({
               insights: Type.Array(
                 Type.Object({
-                  finding: Type.String({ description: "一句话结论" }),
-                  evidence: Type.String({ description: "支撑该结论的具体数字，来自 submit_filter 返回的聚合结果" }),
-                })
+                  finding: Type.String({ minLength: 1, description: "一句话结论" }),
+                  evidence: Type.String({ minLength: 1, description: "支撑该结论的具体数字，来自 submit_filter 返回的聚合结果" }),
+                }),
+                { minItems: 1, maxItems: 3 }
               ),
             }),
             async execute(_id, p: { insights: Insight[] }) {
+              if (!capturedFilter) {
+                return { content: [{ type: "text", text: "请先成功提交 submit_filter，再基于聚合结果提交洞察。" }], details: {} };
+              }
               capturedInsights = p.insights;
               return { content: [{ type: "text", text: `已记录 ${p.insights.length} 条洞察。` }], details: {} };
             },
@@ -318,7 +335,7 @@ export default function (pi: ExtensionAPI) {
         resourceLoader: await roleLoader(ctx.cwd, [
           "你是数据分析员（Analyst）。",
           `用户要求：${params.requirement}`,
-          "工作流程（两步，缺一不可）：",
+          "工作流程（三步，按顺序执行）：",
           "1. 先调用 list_raw_rows 查看全部原始流水；",
           "2. 把用户要求翻译成结构化条件，调用 submit_filter 提交（regions/products/months/groupBy）；",
           "   工具会返回由代码算好的聚合结果。",
@@ -330,12 +347,31 @@ export default function (pi: ExtensionAPI) {
 
       // 取消传播：上层中止时子 Agent 立刻停（第 6a 章学的模式）
       const onAbort = () => void session.abort();
-      if (signal?.aborted) onAbort();
-      else signal?.addEventListener("abort", onAbort, { once: true });
+      signal?.addEventListener("abort", onAbort, { once: true });
+      const unsubscribe = session.subscribe((event) => {
+        // prompt 的异步准备阶段也可能收到取消；等循环启动时再次中止。
+        if (event.type === "agent_start" && signal?.aborted) onAbort();
+        if (event.type === "tool_execution_end" && event.isError) {
+          // Schema 校验失败会跳过 execute，也必须让旧产物失效。
+          if (event.toolName === "submit_filter") {
+            capturedFilter = null;
+            capturedInsights = null;
+          } else if (event.toolName === "submit_insights") {
+            capturedInsights = null;
+          }
+        }
+      });
 
       try {
+        signal?.throwIfAborted();
         await session.prompt(`分析销售数据并提交：${params.requirement}`);
+        signal?.throwIfAborted();
+        const last = session.state.messages.at(-1);
+        if (last?.role === "assistant" && (last.stopReason === "error" || last.stopReason === "aborted")) {
+          throw new Error(last.errorMessage || `Analyst 未正常完成：${last.stopReason}`);
+        }
       } finally {
+        unsubscribe();
         signal?.removeEventListener("abort", onAbort);
         session.dispose();
       }
