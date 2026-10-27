@@ -7,7 +7,8 @@
 // 4. 用 pi.appendEntry 持久化开关状态，支持会话分支
 //
 // 设计要点：
-// - 保护路径和危险命令是硬约束（代码层 block），不靠 prompt
+// - 命中的调用由代码层 block；路径/命令子串匹配仅用于演示，不是沙箱
+// - bash 仍可能改写保护文件；命中的危险命令在无 UI 时直接阻止
 // - 安全模式开关本身也持久化到会话——fork 后状态正确
 
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
@@ -91,7 +92,10 @@ export default function (pi: ExtensionAPI) {
     if (event.toolName === "bash") {
       const command = (event.input as { command?: string }).command ?? "";
       const isDangerous = DANGEROUS_COMMANDS.some((d) => command.includes(d));
-      if (isDangerous && ctx.hasUI) {
+      if (isDangerous) {
+        if (!ctx.hasUI) {
+          return { block: true, reason: "危险命令需要交互确认，当前没有 UI，已阻止执行" };
+        }
         const ok = await ctx.ui.confirm(
           "🛡 危险操作确认",
           `即将执行：${command}\n\n确定要继续吗？`,

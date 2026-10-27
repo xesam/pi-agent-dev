@@ -41,7 +41,7 @@
 | 第 6b 章 | 实战 Level-2：安全编码守卫 | [`chapters/06b-实战安全编码守卫.md`](chapters/06b-实战安全编码守卫.md) | 路径保护 + 命令拦截 + 状态持久化 | ~80 行 |
 | 第 6c 章 | 实战 Level-2.5：数据分析与报表生成 | [`chapters/06c-实战数据分析与报表.md`](chapters/06c-实战数据分析与报表.md) | 两 Agent 两次交接结构化产物；代码算数 + 模型判断 | ~300 行 |
 | 第 6d 章 | 实战 Level-3：多角色 Agent 团队 | [`chapters/06d-实战多角色Agent团队.md`](chapters/06d-实战多角色Agent团队.md) | PM → Coder → Reviewer 三角色协作 | ~230 行 |
-| 第 6e 章 | 实战 Level-4：用 SDK 嵌入 Pi | [`chapters/06e-实战SDK嵌入Pi.md`](chapters/06e-实战SDK嵌入Pi.md) | 把 Pi 嵌入 CI 代码审查脚本 | ~50 行 |
+| 第 6e 章 | 实战 Level-4：用 SDK 嵌入 Pi | [`chapters/06e-实战SDK嵌入Pi.md`](chapters/06e-实战SDK嵌入Pi.md) | 把 Pi 嵌入 CI 代码审查脚本 | 见完整示例 |
 | 第 6f 章 | 调试与观测 | [`chapters/06f-调试与观测.md`](chapters/06f-调试与观测.md) | 观测 Leader/子 Agent 行为，隔离角色测试，排错路径 | — |
 
 ### 第四部分：进阶与参考
@@ -87,5 +87,5 @@ Level 2: ~60 行     → 单角色 Subagent（Ch6a）              → "子 Agen
 Level 3: ~80 行     → 安全编码守卫（Ch6b）                  → "工具白名单 + 事件拦截 = 安全边界"
 Level 3.5: ~300 行  → 数据分析与报表生成（Ch6c）            → "代码算数 + 模型判断"
 Level 4: ~230 行    → 多角色团队（Ch6d）                    → "多角色协作 = Leader 调工具"
-Level 5: ~50 行     → SDK 嵌入（Ch6e）                      → "Pi 不只是 CLI"
+Level 5: 完整脚本   → SDK 嵌入（Ch6e）                      → "Pi 不只是 CLI"
 ```

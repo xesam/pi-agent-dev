@@ -4,6 +4,8 @@
   "version": "0.1.0",
   "description": "教程配套示例 Level-4：用 SDK 嵌入 Pi 的 CI 代码审查脚本",
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "*"
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": "*",
+    "typebox": "*"
   }
 }
