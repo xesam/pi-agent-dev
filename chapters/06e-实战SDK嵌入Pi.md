@@ -219,6 +219,21 @@ session.dispose();
 
 `submit_review` 用枚举 Schema 限定 `approved/rejected`，并检查理由不为空。事件流中的自然语言只用于展示，不参与判定。通过退出 0，拒绝退出 1；缺少非空 diff、没有有效提交或运行异常退出 2。`submit_review` 虽是自定义工具，也必须列入 `tools` 白名单。Schema 校验可能在 `execute` 之前拒绝调用，因此还要监听失败的 `tool_execution_end`：本轮任意一次结构化提交失败都会锁存为异常、退出 2，即使前后曾提交 `approved` 也不能放行，需要重新运行完整审查。模型以 `error` 或 `aborted` 结束也按异常处理，不能拿此前的结论判定通过。
 
+```mermaid
+flowchart TD
+    Start["启动 CI 审查脚本"] --> Diff{"有非空 diff？"}
+    Diff -->|"否"| Exit2["退出码 2<br/>输入或审查无效"]
+    Diff -->|"是"| Run["创建 SDK Session<br/>等待审查运行结束"]
+    Run --> Clean{"运行与提交均无异常？"}
+    Clean -->|"否"| Exit2
+    Clean -->|"是"| Verdict{"最终有效 verdict？"}
+    Verdict -->|"没有有效结论"| Exit2
+    Verdict -->|"approved"| Exit0["退出码 0：通过"]
+    Verdict -->|"rejected"| Exit1["退出码 1：拒绝"]
+```
+
+图中的“无异常”同时要求运行正常结束（没有异常、`error` 或 `aborted`），且本轮没有任何失败的 `submit_review`。先检查异常，再看有效结论；自然语言中的“通过”不影响退出码。
+
 ### 6e.5 运行
 
 ```bash

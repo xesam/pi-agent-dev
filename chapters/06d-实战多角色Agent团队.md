@@ -8,18 +8,20 @@
 
 我们要做的是一个迷你"软件团队"：
 
+```mermaid
+flowchart TD
+    User["用户需求 → Leader"] --> PM["派给 PM（只读）<br/>拆解任务与验收标准"]
+    PM --> Gate{"本次 Coder 派单<br/>超过第 4 次？"}
+    Gate -->|"否"| Coder["派给 Coder（读写 + bash）<br/>实现或按审查意见修复"]
+    Gate -->|"是：第 5 次请求"| Stop["返回 CIRCUIT_BREAKER<br/>Leader 停止并汇报未解决问题"]
+    Coder --> Review["派给 Reviewer（只读）<br/>submit_review 提交结构化结论"]
+    Review --> Verdict{"verdict？"}
+    Verdict -->|"approved"| Done["Leader 汇报完成结果"]
+    Verdict -->|"rejected：带回 comments"| Gate
+    Verdict -->|"缺少有效结论：重新审查"| Review
 ```
-用户提一个需求
-   ↓
-【PM 角色】把需求拆成任务列表 + 验收标准（只读工具，不许改代码）
-   ↓
-【Coder 角色】照着任务列表去实现（读写工具 + bash）
-   ↓
-【Reviewer 角色】照着验收标准审查 Coder 的结果（只读工具，不许改代码）
-   ↓
-   通过？ → 结束，汇报用户
-   不通过？ → 把审查意见打回给 Coder，回到"实现"那一步
-```
+
+图中的箭头表示 **Leader 期望执行的阶段顺序**，每次派单都由 Leader 调用 `delegate`，子会话之间没有直接通信。顺序由提示词引导；Coder 最多执行 4 次派单（首次实现 + 最多 3 次返工）的限制由代码强制执行，第 5 次请求只返回熔断结果。
 
 **核心设计问题**：Pi 官方没有内置"多 Agent"或"sub-agent"这个概念（前面第 2.2 节提过），那我们怎么实现"角色"？
 
@@ -424,19 +426,28 @@ pi
 
 把上面这六步展开成一次真实的调用链（以"被驳回一次、再通过"的典型情况为例），消息是这样在角色间传递的：
 
-```
-用户:    /team 帮我加一个 add(a,b) 函数
-Leader:  → delegate(role=pm, "拆解这个需求")
-PM:       (读代码库) → 返回任务列表 + 验收标准
-Leader:  → delegate(role=coder, "按任务列表实现")
-Coder:    (write/edit/bash) → 返回实现总结
-Leader:  → delegate(role=reviewer, "按验收标准审查")
-Reviewer: (读代码) → submit_review(verdict=rejected) → 返回驳回意见
-Leader:  → delegate(role=coder, "按驳回意见修复")
-Coder:    (edit) → 返回修复总结
-Leader:  → delegate(role=reviewer, "重新审查")
-Reviewer: → submit_review(verdict=approved)
-Leader:  → 向用户总结全过程
+```mermaid
+sequenceDiagram
+    actor User as 用户
+    participant Leader
+    participant PM
+    participant Coder
+    participant Reviewer
+    User->>Leader: /team 帮我加一个 add(a,b) 函数
+    Leader->>PM: delegate(pm, 拆解需求)
+    PM-->>Leader: 任务列表与验收标准
+    Leader->>Coder: delegate(coder, 首次实现)
+    Coder-->>Leader: 实现总结
+    Leader->>Reviewer: delegate(reviewer, 按验收标准审查)
+    Reviewer->>Reviewer: submit_review(rejected)
+    Reviewer-->>Leader: 驳回意见
+    Leader->>Coder: delegate(coder, 按意见返工)
+    Coder-->>Leader: 修复总结
+    Leader->>Reviewer: delegate(reviewer, 重新审查)
+    Reviewer->>Reviewer: submit_review(approved)
+    Reviewer-->>Leader: 通过结论
+    Leader-->>User: 总结结果
+    Note over Leader,Reviewer: 参与者表示角色；每次 delegate 都创建全新子会话
 ```
 
 注意 Leader 自始至终只在做一件事：反复调用 `delegate` 工具。三个子会话彼此看不见对方，它们只把自己当成被派来干一次活的——**"团队协作"完全发生在 Leader 的 Agent Loop 里**，子会话之间没有任何直接通信。这跟第 1 章讲的是同一件事：Agent 就是一段循环，`delegate` 只是循环里一个能"再起一段循环"的工具。

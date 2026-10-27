@@ -13,17 +13,14 @@ messages = [{ role: "user", content: "…" }]
 如果想更容易理解 Agent，可以参考：[《从零理解 AI Agent》](https://github.com/xesam/from-chat-to-agent) 这个更基础的教程。
 
 
-```
-你给一个任务
-   ↓
-┌→ 模型决定下一步
-│      │
-│      ├─ 不再调工具 ──→ 输出最终文字，结束
-│      │
-│      └─ 要调工具 ──→ 执行工具 ──→ 结果塞回 messages
-│                                          │
-└──────────────────────────────────────────┘
-（带着工具结果，回到模型，再决定下一步）
+```mermaid
+flowchart TD
+    Start["用户给出任务"] --> Model["模型根据当前 messages 决定下一步"]
+    Model --> NeedTool{"需要调用工具？"}
+    NeedTool -->|否| Final["输出最终回复，结束"]
+    NeedTool -->|是| Runtime["Pi 执行工具"]
+    Runtime --> Result["工具结果加入 messages"]
+    Result --> Model
 ```
 
 这个"决定 → 执行 → 把结果喂回去 → 再决定"的循环，就是 **Agent Loop（智能体循环）**。换句话说，**Agent 不是一种新模型，而是围绕模型写的一段循环代码**。所有 Agent 框架（Pi、Claude Code、Cursor、LangGraph……）的核心其实都是这一件事，区别只在于三个旋钮：
